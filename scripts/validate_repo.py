@@ -5,11 +5,38 @@ from __future__ import annotations
 
 import ast
 import json
+import re
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parent.parent
 PLUGIN = ROOT / "plugins" / "mem0"
+MEM0_TOOLS = {
+    "add_memory",
+    "search_memories",
+    "get_memories",
+    "get_memory",
+    "update_memory",
+    "delete_memory",
+    "get_memory_history",
+    "list_entities",
+    "delete_all_memories",
+    "delete_entities",
+}
+BULK_TOOLS = {"delete_all_memories", "delete_entities"}
+READ_ONLY_TOOLS = {
+    "search_memories",
+    "get_memories",
+    "get_memory",
+    "get_memory_history",
+    "list_entities",
+}
+DESTRUCTIVE_TOOLS = {
+    "update_memory",
+    "delete_memory",
+    "delete_all_memories",
+    "delete_entities",
+}
 
 
 def load_json(path: Path) -> dict:
@@ -23,6 +50,7 @@ def main() -> None:
     manifest = load_json(PLUGIN / ".codex-plugin" / "plugin.json")
     mcp = load_json(PLUGIN / ".mcp.json")
     hooks = load_json(PLUGIN / "hooks" / "hooks.json")
+    schema_snapshot = load_json(PLUGIN / "mcp-schema.snapshot.json")
 
     assert marketplace["name"] == "mem0-self-hosted"
     assert marketplace["plugins"][0]["source"]["path"] == "./plugins/mem0"
@@ -30,10 +58,65 @@ def main() -> None:
     assert manifest["mcpServers"] == "./.mcp.json"
     assert mcp["mcpServers"]["mem0"]["url"] == "https://mem0-api.jiang.in/mcp"
     assert mcp["mcpServers"]["mem0"]["bearer_token_env_var"] == "MEM0_MCP_TOKEN"
-    assert set(hooks["hooks"]) == {"SessionStart", "UserPromptSubmit", "Stop", "PreCompact"}
+    assert set(mcp["mcpServers"]["mem0"]["disabled_tools"]) == BULK_TOOLS
+    assert schema_snapshot["snapshot_version"] == 1
+    snapshot_tools = schema_snapshot.get("tools", {})
+    assert set(snapshot_tools) == MEM0_TOOLS, "MCP 契约快照的工具集合不完整"
+    for name, contract in snapshot_tools.items():
+        assert isinstance(contract.get("properties"), list), f"{name} 快照缺少 properties"
+        assert isinstance(contract.get("required"), list), f"{name} 快照缺少 required"
+        assert isinstance(contract.get("types"), dict), f"{name} 快照缺少 types"
+        assert isinstance(contract.get("defaults"), dict), f"{name} 快照缺少 defaults"
+        assert isinstance(contract.get("enums"), dict), f"{name} 快照缺少 enums"
+        annotations = contract.get("annotations", {})
+        assert set(annotations) == {
+            "readOnlyHint",
+            "destructiveHint",
+            "idempotentHint",
+            "openWorldHint",
+        }, f"{name} 快照的 annotations 不完整"
+        assert annotations["readOnlyHint"] is (name in READ_ONLY_TOOLS)
+        assert annotations["destructiveHint"] is (name in DESTRUCTIVE_TOOLS)
+    assert snapshot_tools["list_entities"]["enums"]["entity_type"] == ["project", "run"]
+    assert snapshot_tools["delete_entities"]["enums"]["entity_type"] == ["project", "run"]
+    assert snapshot_tools["get_memories"]["enums"]["sort_by"] == [
+        "created_at",
+        "updated_at",
+        "expiration_date",
+    ]
+    assert snapshot_tools["get_memories"]["enums"]["sort_order"] == ["asc", "desc"]
+    assert set(hooks["hooks"]) == {
+        "PreToolUse",
+        "SessionStart",
+        "UserPromptSubmit",
+        "PostToolUse",
+        "Stop",
+        "PreCompact",
+    }
+    serialized_hooks = json.dumps(hooks, ensure_ascii=False)
+    assert "commandWindows" in serialized_hooks, "钩子缺少 Windows 命令"
+    assert "apply_patch" in serialized_hooks, "钩子缺少记忆文件写入保护"
+    assert "PostToolUse" in serialized_hooks and "Bash" in serialized_hooks
+    mem0_matchers = [
+        group["matcher"]
+        for group in hooks["hooks"]["PreToolUse"]
+        if "mcp__mem0__" in group.get("matcher", "")
+    ]
+    assert len(mem0_matchers) == 1
+    matcher = re.compile(mem0_matchers[0])
+    for name in MEM0_TOOLS:
+        assert matcher.fullmatch(f"mcp__mem0__{name}"), f"钩子未匹配 Mem0 工具：{name}"
+        assert matcher.fullmatch(f"mcp__plugin_mem0_mem0__{name}"), f"钩子未匹配插件工具：{name}"
 
     script = (PLUGIN / "scripts" / "mem0_self_hosted.py").read_text(encoding="utf-8")
-    ast.parse(script)
+    syntax_tree = ast.parse(script)
+    tool_assignment = next(
+        node
+        for node in syntax_tree.body
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "MEM0_TOOL_NAMES" for target in node.targets)
+    )
+    assert ast.literal_eval(tool_assignment.value) == MEM0_TOOLS
     runtime_text = script + json.dumps(mcp) + json.dumps(hooks)
     for forbidden in ("api.mem0.ai", "mcp.mem0.ai", "MEM0_API_KEY", "C:\\Users\\"):
         assert forbidden not in runtime_text, f"运行时包含禁止内容：{forbidden}"
@@ -41,7 +124,11 @@ def main() -> None:
     skill_dirs = [path for path in (PLUGIN / "skills").iterdir() if path.is_dir()]
     assert len(skill_dirs) == 16, "技能数量必须为 16"
     assert all((path / "SKILL.md").is_file() for path in skill_dirs), "技能缺少 SKILL.md"
-    print("验证通过：市场、MCP、四类钩子、运行时边界和 16 个技能均有效")
+    runtime_contract = (PLUGIN / "SELF_HOSTED_RUNTIME.md").read_text(encoding="utf-8")
+    for name in MEM0_TOOLS:
+        assert f"`{name}(" in runtime_contract, f"运行时约定缺少工具：{name}"
+    assert "默认禁用" in runtime_contract and all(name in runtime_contract for name in BULK_TOOLS)
+    print("验证通过：市场、MCP 十工具、六类增强钩子、运行时边界和 16 个技能均有效")
 
 
 if __name__ == "__main__":

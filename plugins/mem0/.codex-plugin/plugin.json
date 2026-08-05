@@ -1,27 +1,35 @@
 {
   "name": "mem0",
-  "version": "0.2.13-selfhosted.3",
-  "description": "面向 Codex 的 Mem0 自托管长期记忆插件。",
+  "version": "0.2.13-selfhosted.4+codex.20260805114353",
+  "description": "\u9762\u5411 Codex \u7684 Mem0 \u81ea\u6258\u7ba1\u957f\u671f\u8bb0\u5fc6\u63d2\u4ef6\u3002",
   "author": {
-    "name": "Mem0 自托管适配"
+    "name": "Mem0 \u81ea\u6258\u7ba1\u9002\u914d"
   },
   "homepage": "https://github.com/devkitio/mem0-codex-self-hosted-marketplace",
   "repository": "https://github.com/devkitio/mem0-codex-self-hosted-marketplace",
   "license": "Apache-2.0",
-  "keywords": ["memory", "self-hosted", "mcp", "codex"],
+  "keywords": [
+    "memory",
+    "self-hosted",
+    "mcp",
+    "codex"
+  ],
   "skills": "./skills/",
   "mcpServers": "./.mcp.json",
   "interface": {
-    "displayName": "Mem0 自托管版",
-    "shortDescription": "通过私有 Mem0 服务保存和检索长期记忆",
-    "longDescription": "连接用户自托管的 Mem0 MCP，在会话开始和提交提示时检索上下文，并在每轮结束或压缩前自动提取长期记忆。",
-    "developerName": "Mem0 自托管适配",
+    "displayName": "Mem0 \u81ea\u6258\u7ba1\u7248",
+    "shortDescription": "\u901a\u8fc7\u79c1\u6709 Mem0 \u670d\u52a1\u4fdd\u5b58\u548c\u68c0\u7d22\u957f\u671f\u8bb0\u5fc6",
+    "longDescription": "\u8fde\u63a5\u7528\u6237\u81ea\u6258\u7ba1\u7684 Mem0 MCP\uff0c\u81ea\u52a8\u5bfc\u5165\u9879\u76ee\u89c4\u5219\u3001\u8865\u9f50\u9879\u76ee\u8303\u56f4\u3001\u6309\u63d0\u793a\u6216\u6587\u4ef6\u68c0\u7d22\u4e0a\u4e0b\u6587\u3001\u56de\u5fc6\u5386\u53f2\u9519\u8bef\uff0c\u5e76\u5728\u6bcf\u8f6e\u7ed3\u675f\u6216\u538b\u7f29\u524d\u63d0\u53d6\u957f\u671f\u8bb0\u5fc6\u3002",
+    "developerName": "Mem0 \u81ea\u6258\u7ba1\u9002\u914d",
     "category": "Productivity",
-    "capabilities": ["Read", "Write"],
+    "capabilities": [
+      "Read",
+      "Write"
+    ],
     "defaultPrompt": [
-      "搜索与当前项目有关的长期记忆",
-      "记住我刚才确认的项目决定",
-      "检查自托管 Mem0 是否工作正常"
+      "\u641c\u7d22\u4e0e\u5f53\u524d\u9879\u76ee\u6709\u5173\u7684\u957f\u671f\u8bb0\u5fc6",
+      "\u8bb0\u4f4f\u6211\u521a\u624d\u786e\u8ba4\u7684\u9879\u76ee\u51b3\u5b9a",
+      "\u68c0\u67e5\u81ea\u6258\u7ba1 Mem0 \u662f\u5426\u5de5\u4f5c\u6b63\u5e38"
     ],
     "brandColor": "#FBBF24",
     "logo": "./assets/logo.svg"

@@ -1,0 +1,154 @@
+{
+  "snapshot_version": 1,
+  "tools": {
+    "add_memory": {
+      "properties": ["expiration_date", "infer", "messages", "metadata", "project_id", "run_id", "text"],
+      "required": [],
+      "types": {
+        "expiration_date": ["null", "string"],
+        "infer": ["boolean"],
+        "messages": ["array", "null"],
+        "metadata": ["null", "object"],
+        "project_id": ["null", "string"],
+        "run_id": ["null", "string"],
+        "text": ["null", "string"]
+      },
+      "defaults": {
+        "expiration_date": null,
+        "infer": false,
+        "messages": null,
+        "metadata": null,
+        "project_id": null,
+        "run_id": null,
+        "text": null
+      },
+      "enums": {},
+      "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": false, "openWorldHint": false}
+    },
+    "delete_all_memories": {
+      "properties": ["confirmation_token", "project_id", "run_id"],
+      "required": ["project_id"],
+      "types": {
+        "confirmation_token": ["null", "string"],
+        "project_id": ["string"],
+        "run_id": ["null", "string"]
+      },
+      "defaults": {"confirmation_token": null, "run_id": null},
+      "enums": {},
+      "annotations": {"readOnlyHint": false, "destructiveHint": true, "idempotentHint": false, "openWorldHint": false}
+    },
+    "delete_entities": {
+      "properties": ["confirmation_token", "entity_id", "entity_type", "project_id"],
+      "required": ["entity_id", "entity_type"],
+      "types": {
+        "confirmation_token": ["null", "string"],
+        "entity_id": ["string"],
+        "entity_type": ["string"],
+        "project_id": ["null", "string"]
+      },
+      "defaults": {"confirmation_token": null, "project_id": null},
+      "enums": {"entity_type": ["project", "run"]},
+      "annotations": {"readOnlyHint": false, "destructiveHint": true, "idempotentHint": false, "openWorldHint": false}
+    },
+    "delete_memory": {
+      "properties": ["memory_id", "project_id"],
+      "required": ["memory_id"],
+      "types": {"memory_id": ["string"], "project_id": ["null", "string"]},
+      "defaults": {"project_id": null},
+      "enums": {},
+      "annotations": {"readOnlyHint": false, "destructiveHint": true, "idempotentHint": true, "openWorldHint": false}
+    },
+    "get_memories": {
+      "properties": ["filters", "limit", "page", "page_size", "project_id", "show_expired", "sort_by", "sort_order"],
+      "required": [],
+      "types": {
+        "filters": ["null", "object"],
+        "limit": ["integer"],
+        "page": ["integer"],
+        "page_size": ["integer", "null"],
+        "project_id": ["null", "string"],
+        "show_expired": ["boolean"],
+        "sort_by": ["string"],
+        "sort_order": ["string"]
+      },
+      "defaults": {
+        "filters": null,
+        "limit": 50,
+        "page": 1,
+        "page_size": null,
+        "project_id": null,
+        "show_expired": false,
+        "sort_by": "updated_at",
+        "sort_order": "desc"
+      },
+      "enums": {
+        "sort_by": ["created_at", "updated_at", "expiration_date"],
+        "sort_order": ["asc", "desc"]
+      },
+      "annotations": {"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false}
+    },
+    "get_memory": {
+      "properties": ["memory_id", "project_id"],
+      "required": ["memory_id"],
+      "types": {"memory_id": ["string"], "project_id": ["null", "string"]},
+      "defaults": {"project_id": null},
+      "enums": {},
+      "annotations": {"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false}
+    },
+    "get_memory_history": {
+      "properties": ["memory_id", "project_id"],
+      "required": ["memory_id"],
+      "types": {"memory_id": ["string"], "project_id": ["null", "string"]},
+      "defaults": {"project_id": null},
+      "enums": {},
+      "annotations": {"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false}
+    },
+    "list_entities": {
+      "properties": ["entity_type", "project_id"],
+      "required": [],
+      "types": {"entity_type": ["null", "string"], "project_id": ["null", "string"]},
+      "defaults": {"entity_type": null, "project_id": null},
+      "enums": {"entity_type": ["project", "run"]},
+      "annotations": {"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false}
+    },
+    "search_memories": {
+      "properties": ["explain", "filters", "project_id", "query", "rerank", "show_expired", "threshold", "top_k"],
+      "required": ["query"],
+      "types": {
+        "explain": ["boolean"],
+        "filters": ["null", "object"],
+        "project_id": ["null", "string"],
+        "query": ["string"],
+        "rerank": ["boolean"],
+        "show_expired": ["boolean"],
+        "threshold": ["null", "number"],
+        "top_k": ["integer"]
+      },
+      "defaults": {
+        "explain": false,
+        "filters": null,
+        "project_id": null,
+        "rerank": false,
+        "show_expired": false,
+        "threshold": null,
+        "top_k": 10
+      },
+      "enums": {},
+      "annotations": {"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false}
+    },
+    "update_memory": {
+      "properties": ["expiration_date", "memory_id", "metadata", "project_id", "text"],
+      "required": ["memory_id"],
+      "types": {
+        "expiration_date": ["null", "string"],
+        "memory_id": ["string"],
+        "metadata": ["null", "object"],
+        "project_id": ["null", "string"],
+        "text": ["null", "string"]
+      },
+      "defaults": {"expiration_date": null, "metadata": null, "project_id": null, "text": null},
+      "enums": {},
+      "annotations": {"readOnlyHint": false, "destructiveHint": true, "idempotentHint": false, "openWorldHint": false}
+    }
+  }
+}

@@ -2,7 +2,8 @@
   "mcpServers": {
     "mem0": {
       "url": "https://mem0-api.jiang.in/mcp",
-      "bearer_token_env_var": "MEM0_MCP_TOKEN"
+      "bearer_token_env_var": "MEM0_MCP_TOKEN",
+      "disabled_tools": ["delete_all_memories", "delete_entities"]
     }
   }
 }

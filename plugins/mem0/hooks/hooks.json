@@ -1,16 +1,55 @@
 {
-  "description": "从自托管 Mem0 自动加载上下文并保存长期记忆。",
+  "description": "从自托管 Mem0 自动加载上下文、导入项目规则、回忆历史错误并保存长期记忆。",
   "hooks": {
-    "SessionStart": [
+    "PreToolUse": [
       {
-        "matcher": "startup|resume|compact",
+        "matcher": "Write|Edit|MultiEdit|apply_patch",
         "hooks": [
           {
             "type": "command",
             "command": "python3 \"${PLUGIN_ROOT}/scripts/mem0_self_hosted.py\"",
             "commandWindows": "python \"${PLUGIN_ROOT}\\scripts\\mem0_self_hosted.py\"",
-            "timeout": 20,
-            "statusMessage": "正在加载自托管 Mem0 上下文",
+            "timeout": 3,
+            "statusMessage": "正在检查长期记忆写入路径"
+          }
+        ]
+      },
+      {
+        "matcher": "mcp__mem0__(add_memory|search_memories|get_memories|get_memory|update_memory|delete_memory|get_memory_history|list_entities|delete_all_memories|delete_entities)|mcp__plugin_mem0_mem0__(add_memory|search_memories|get_memories|get_memory|update_memory|delete_memory|get_memory_history|list_entities|delete_all_memories|delete_entities)",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${PLUGIN_ROOT}/scripts/mem0_self_hosted.py\"",
+            "commandWindows": "python \"${PLUGIN_ROOT}\\scripts\\mem0_self_hosted.py\"",
+            "timeout": 3,
+            "statusMessage": "正在补齐自托管 Mem0 项目范围"
+          }
+        ]
+      },
+      {
+        "matcher": "Read|read_file|read_text_file|mcp__.*__read_file|mcp__.*__read_text_file",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${PLUGIN_ROOT}/scripts/mem0_self_hosted.py\"",
+            "commandWindows": "python \"${PLUGIN_ROOT}\\scripts\\mem0_self_hosted.py\"",
+            "timeout": 8,
+            "statusMessage": "正在查找文件相关历史",
+            "additionalContextLimit": 1500
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${PLUGIN_ROOT}/scripts/mem0_self_hosted.py\"",
+            "commandWindows": "python \"${PLUGIN_ROOT}\\scripts\\mem0_self_hosted.py\"",
+            "timeout": 60,
+            "statusMessage": "正在导入项目规则并加载自托管 Mem0 上下文",
             "additionalContextLimit": 1500
           }
         ]
@@ -30,6 +69,33 @@
         ]
       }
     ],
+    "PostToolUse": [
+      {
+        "matcher": "mcp__mem0__.*|mcp__plugin_mem0_mem0__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${PLUGIN_ROOT}/scripts/mem0_self_hosted.py\"",
+            "commandWindows": "python \"${PLUGIN_ROOT}\\scripts\\mem0_self_hosted.py\"",
+            "timeout": 3,
+            "statusMessage": "正在记录 Mem0 会话统计"
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${PLUGIN_ROOT}/scripts/mem0_self_hosted.py\"",
+            "commandWindows": "python \"${PLUGIN_ROOT}\\scripts\\mem0_self_hosted.py\"",
+            "timeout": 12,
+            "statusMessage": "正在检查历史错误解决记录",
+            "additionalContextLimit": 1500
+          }
+        ]
+      }
+    ],
     "Stop": [
       {
         "hooks": [
@@ -37,7 +103,7 @@
             "type": "command",
             "command": "python3 \"${PLUGIN_ROOT}/scripts/mem0_self_hosted.py\"",
             "commandWindows": "python \"${PLUGIN_ROOT}\\scripts\\mem0_self_hosted.py\"",
-            "timeout": 20,
+            "timeout": 30,
             "statusMessage": "正在保存自托管 Mem0 会话总结"
           }
         ]
@@ -51,7 +117,7 @@
             "type": "command",
             "command": "python3 \"${PLUGIN_ROOT}/scripts/mem0_self_hosted.py\"",
             "commandWindows": "python \"${PLUGIN_ROOT}\\scripts\\mem0_self_hosted.py\"",
-            "timeout": 20,
+            "timeout": 30,
             "statusMessage": "正在保存压缩前的 Mem0 总结"
           }
         ]

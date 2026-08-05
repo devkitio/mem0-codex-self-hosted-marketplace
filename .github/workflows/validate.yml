@@ -16,3 +16,5 @@ jobs:
           python-version: "3.12"
       - name: 验证市场和插件
         run: python scripts/validate_repo.py
+      - name: 运行生命周期脚本测试
+        run: python -m unittest discover -s tests -v
