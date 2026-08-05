@@ -1,6 +1,6 @@
 {
   "name": "mem0",
-  "version": "0.2.13-selfhosted.2",
+  "version": "0.2.13-selfhosted.3",
   "description": "面向 Codex 的 Mem0 自托管长期记忆插件。",
   "author": {
     "name": "Mem0 自托管适配"

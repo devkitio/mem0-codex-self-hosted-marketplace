@@ -270,14 +270,26 @@ def self_test() -> None:
     if missing:
         raise RuntimeError(f"自托管 MCP 缺少工具：{', '.join(missing)}")
     url, _ = load_connection()
-    print(json.dumps({"状态": "通过", "地址": url, "工具": sorted(required)}, ensure_ascii=False))
+    print(json.dumps({"状态": "通过", "地址": url, "工具": sorted(required)}, ensure_ascii=True))
 
 
 def main() -> int:
-    try:
-        if "--check" in sys.argv:
+    if "--check" in sys.argv:
+        try:
             self_test()
             return 0
+        except Exception as exc:
+            log_error(f"{type(exc).__name__}: {exc}")
+            print(
+                json.dumps(
+                    {"状态": "失败", "错误": f"{type(exc).__name__}: {exc}"},
+                    ensure_ascii=True,
+                ),
+                file=sys.stderr,
+            )
+            return 1
+
+    try:
         hook_input = json.load(sys.stdin)
         if not isinstance(hook_input, dict):
             raise ValueError("钩子输入必须是 JSON 对象")

@@ -6,7 +6,7 @@
 
 - MCP：`https://mem0-api.jiang.in/mcp`
 - 认证环境变量：`MEM0_MCP_TOKEN`
-- 插件版本：`0.2.13-selfhosted.2`
+- 插件版本：`0.2.13-selfhosted.3`
 
 仓库不会保存任何 Mem0 令牌或用户记忆。
 
