@@ -16,6 +16,7 @@
   ],
   "skills": "./skills/",
   "mcpServers": "./.mcp.json",
+  "hooks": "./hooks/hooks.json",
   "interface": {
     "displayName": "Mem0 \u81ea\u6258\u7ba1\u7248",
     "shortDescription": "\u901a\u8fc7\u79c1\u6709 Mem0 \u670d\u52a1\u4fdd\u5b58\u548c\u68c0\u7d22\u957f\u671f\u8bb0\u5fc6",

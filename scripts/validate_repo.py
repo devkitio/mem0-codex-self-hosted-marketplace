@@ -37,6 +37,32 @@ DESTRUCTIVE_TOOLS = {
     "delete_all_memories",
     "delete_entities",
 }
+OFFICIAL_CODEX_HOOK_EVENTS = {
+    "PreToolUse",
+    "SessionStart",
+    "UserPromptSubmit",
+    "PostToolUse",
+    "Stop",
+    "PreCompact",
+}
+OFFICIAL_CODEX_SKILLS = {
+    "context-loader",
+    "dream",
+    "export",
+    "forget",
+    "health",
+    "import",
+    "list-projects",
+    "mem0",
+    "memory-reviewer",
+    "onboard",
+    "peek",
+    "pin",
+    "remember",
+    "stats",
+    "switch-project",
+    "tour",
+}
 
 
 def load_json(path: Path) -> dict:
@@ -56,6 +82,7 @@ def main() -> None:
     assert marketplace["plugins"][0]["source"]["path"] == "./plugins/mem0"
     assert manifest["name"] == "mem0"
     assert manifest["mcpServers"] == "./.mcp.json"
+    assert manifest["hooks"] == "./hooks/hooks.json"
     assert mcp["mcpServers"]["mem0"]["url"] == "https://mem0-api.jiang.in/mcp"
     assert mcp["mcpServers"]["mem0"]["bearer_token_env_var"] == "MEM0_MCP_TOKEN"
     assert set(mcp["mcpServers"]["mem0"]["disabled_tools"]) == BULK_TOOLS
@@ -85,14 +112,7 @@ def main() -> None:
         "expiration_date",
     ]
     assert snapshot_tools["get_memories"]["enums"]["sort_order"] == ["asc", "desc"]
-    assert set(hooks["hooks"]) == {
-        "PreToolUse",
-        "SessionStart",
-        "UserPromptSubmit",
-        "PostToolUse",
-        "Stop",
-        "PreCompact",
-    }
+    assert set(hooks["hooks"]) == OFFICIAL_CODEX_HOOK_EVENTS
     serialized_hooks = json.dumps(hooks, ensure_ascii=False)
     assert "commandWindows" in serialized_hooks, "钩子缺少 Windows 命令"
     assert "apply_patch" in serialized_hooks, "钩子缺少记忆文件写入保护"
@@ -122,7 +142,7 @@ def main() -> None:
         assert forbidden not in runtime_text, f"运行时包含禁止内容：{forbidden}"
 
     skill_dirs = [path for path in (PLUGIN / "skills").iterdir() if path.is_dir()]
-    assert len(skill_dirs) == 16, "技能数量必须为 16"
+    assert {path.name for path in skill_dirs} == OFFICIAL_CODEX_SKILLS, "技能集合必须对齐官方 Codex 插件"
     assert all((path / "SKILL.md").is_file() for path in skill_dirs), "技能缺少 SKILL.md"
     runtime_contract = (PLUGIN / "SELF_HOSTED_RUNTIME.md").read_text(encoding="utf-8")
     for name in MEM0_TOOLS:
