@@ -1,0 +1,61 @@
+{
+  "description": "从自托管 Mem0 自动加载上下文并保存长期记忆。",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${PLUGIN_ROOT}/scripts/mem0_self_hosted.py\"",
+            "commandWindows": "python \"${PLUGIN_ROOT}\\scripts\\mem0_self_hosted.py\"",
+            "timeout": 20,
+            "statusMessage": "正在加载自托管 Mem0 上下文",
+            "additionalContextLimit": 1500
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${PLUGIN_ROOT}/scripts/mem0_self_hosted.py\"",
+            "commandWindows": "python \"${PLUGIN_ROOT}\\scripts\\mem0_self_hosted.py\"",
+            "timeout": 20,
+            "statusMessage": "正在检索自托管 Mem0",
+            "additionalContextLimit": 1500
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${PLUGIN_ROOT}/scripts/mem0_self_hosted.py\"",
+            "commandWindows": "python \"${PLUGIN_ROOT}\\scripts\\mem0_self_hosted.py\"",
+            "timeout": 20,
+            "statusMessage": "正在保存自托管 Mem0 会话总结"
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "matcher": "manual|auto",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${PLUGIN_ROOT}/scripts/mem0_self_hosted.py\"",
+            "commandWindows": "python \"${PLUGIN_ROOT}\\scripts\\mem0_self_hosted.py\"",
+            "timeout": 20,
+            "statusMessage": "正在保存压缩前的 Mem0 总结"
+          }
+        ]
+      }
+    ]
+  }
+}

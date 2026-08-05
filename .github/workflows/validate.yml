@@ -1,0 +1,18 @@
+name: 验证插件市场
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+      - name: 设置 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: 验证市场和插件
+        run: python scripts/validate_repo.py

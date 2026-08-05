@@ -1,0 +1,29 @@
+{
+  "name": "mem0",
+  "version": "0.2.13-selfhosted.2",
+  "description": "面向 Codex 的 Mem0 自托管长期记忆插件。",
+  "author": {
+    "name": "Mem0 自托管适配"
+  },
+  "homepage": "https://github.com/devkitio/mem0-codex-self-hosted-marketplace",
+  "repository": "https://github.com/devkitio/mem0-codex-self-hosted-marketplace",
+  "license": "Apache-2.0",
+  "keywords": ["memory", "self-hosted", "mcp", "codex"],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Mem0 自托管版",
+    "shortDescription": "通过私有 Mem0 服务保存和检索长期记忆",
+    "longDescription": "连接用户自托管的 Mem0 MCP，在会话开始和提交提示时检索上下文，并在每轮结束或压缩前自动提取长期记忆。",
+    "developerName": "Mem0 自托管适配",
+    "category": "Productivity",
+    "capabilities": ["Read", "Write"],
+    "defaultPrompt": [
+      "搜索与当前项目有关的长期记忆",
+      "记住我刚才确认的项目决定",
+      "检查自托管 Mem0 是否工作正常"
+    ],
+    "brandColor": "#FBBF24",
+    "logo": "./assets/logo.svg"
+  }
+}

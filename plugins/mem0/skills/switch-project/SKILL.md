@@ -1,0 +1,13 @@
+---
+name: switch-project
+description: 在当前任务中把 Mem0 读写范围切换到用户指定的自托管 project_id。
+---
+
+# 切换项目范围
+
+最高优先级：先阅读 `../../SELF_HOSTED_RUNTIME.md`。
+
+1. 使用 `search_memories(query="项目", project_id=<目标项目>, top_k=1)` 验证目标范围可访问；没有记忆不代表项目无效。
+2. 用户确认后，本任务后续所有 Mem0 工具调用都显式传入该 `project_id`。
+3. 这是当前任务内的范围切换，不会修改仓库，也不会永久改变生命周期钩子的 Git 根目录自动识别。
+4. 用户要求恢复时，重新使用当前 Git 根目录名。
