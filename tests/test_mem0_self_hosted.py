@@ -7,7 +7,7 @@ import json
 import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
@@ -80,6 +80,59 @@ class Mem0SelfHostedTests(unittest.TestCase):
         self.assertEqual(status, 0)
         self.assertNotIn("secret-value", log.call_args.args[0])
         self.assertEqual(json.loads(output.getvalue()), {})
+
+    def test_自检失败会脱敏日志和标准错误(self):
+        error = io.StringIO()
+        with mock.patch.object(mem0.sys, "argv", [str(SCRIPT), "--check"]), mock.patch.object(
+            mem0,
+            "self_test",
+            side_effect=RuntimeError("Authorization: Bearer sentinel-secret"),
+        ), mock.patch.object(mem0, "log_error") as log, redirect_stderr(error):
+            status = mem0.main()
+
+        self.assertEqual(status, 1)
+        self.assertNotIn("sentinel-secret", error.getvalue())
+        self.assertNotIn("sentinel-secret", log.call_args.args[0])
+        self.assertIn("[已脱敏]", json.loads(error.getvalue())["错误"])
+
+    def test_MCP_响应限制大小(self):
+        response = mock.MagicMock()
+        response.read.return_value = b"x" * (mem0.MAX_MCP_RESPONSE_BYTES + 1)
+        context = mock.MagicMock()
+        context.__enter__.return_value = response
+        context.__exit__.return_value = False
+        with mock.patch.object(mem0, "load_connection", return_value=("https://mem0.test/mcp", "token")), mock.patch.object(
+            mem0.urllib.request,
+            "urlopen",
+            return_value=context,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "响应超过大小限制"):
+                mem0.mcp_request("tools/list", {})
+
+        response.read.assert_called_once_with(mem0.MAX_MCP_RESPONSE_BYTES + 1)
+
+    def test_MCP_错误正文不会透传(self):
+        response = mock.MagicMock()
+        response.read.return_value = json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "error": {"message": "Authorization: Bearer sentinel-secret"},
+            }
+        ).encode("utf-8")
+        response.headers.get_content_type.return_value = "application/json"
+        context = mock.MagicMock()
+        context.__enter__.return_value = response
+        context.__exit__.return_value = False
+        with mock.patch.object(mem0, "load_connection", return_value=("https://mem0.test/mcp", "token")), mock.patch.object(
+            mem0.urllib.request,
+            "urlopen",
+            return_value=context,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "^MCP 返回错误$") as raised:
+                mem0.mcp_request("tools/list", {})
+
+        self.assertNotIn("sentinel-secret", str(raised.exception))
 
     def test_JSON_形式敏感信息会脱敏(self):
         original = json.dumps(
@@ -333,10 +386,13 @@ class Mem0SelfHostedTests(unittest.TestCase):
             add_count = 0
             fail_search = True
             fail_delete = False
+            fail_add = False
 
             def fake_call(name, arguments):
                 nonlocal add_count
                 if name == "add_memory":
+                    if fail_add:
+                        raise RuntimeError("临时新增失败")
                     add_count += 1
                     memories[f"m-{add_count}"] = arguments["text"]
                     return {}
@@ -381,17 +437,32 @@ class Mem0SelfHostedTests(unittest.TestCase):
                 fail_search = False
                 old_hash = state[scope]["AGENTS.md"]["sha256"]
                 agents.write_text("## 规则\n" + "必须验证新流程。\n" * 20, encoding="utf-8")
+                fail_add = True
+                mem0.auto_import_project_files(str(root), "demo-project")
+                state = mem0.load_json_file(data / "auto_import_state.json", {})
+                self.assertNotEqual(state[scope]["AGENTS.md"]["sha256"], old_hash)
+                self.assertEqual(state[scope]["AGENTS.md"]["previous_hash"], old_hash)
+                self.assertTrue(state[scope]["AGENTS.md"]["pending"])
+                self.assertEqual(add_count, 1)
+                self.assertEqual(len(memories), 1)
+
+                fail_add = False
                 fail_delete = True
                 mem0.auto_import_project_files(str(root), "demo-project")
                 state = mem0.load_json_file(data / "auto_import_state.json", {})
-                self.assertEqual(state[scope]["AGENTS.md"]["sha256"], old_hash)
-                self.assertEqual(add_count, 1)
+                self.assertEqual(state[scope]["AGENTS.md"]["previous_hash"], old_hash)
+                self.assertTrue(state[scope]["AGENTS.md"]["pending"])
+                self.assertEqual(add_count, 2)
+                self.assertEqual(len(memories), 2)
 
                 fail_delete = False
                 mem0.auto_import_project_files(str(root), "demo-project")
                 state = mem0.load_json_file(data / "auto_import_state.json", {})
                 self.assertNotEqual(state[scope]["AGENTS.md"]["sha256"], old_hash)
                 self.assertEqual(add_count, 2)
+                self.assertNotIn("pending", state[scope]["AGENTS.md"])
+                self.assertNotIn("previous_hash", state[scope]["AGENTS.md"])
+                self.assertEqual(len(memories), 1)
 
                 agents.write_text("", encoding="utf-8")
                 mem0.auto_import_project_files(str(root), "demo-project")

@@ -26,6 +26,7 @@ PLUGIN_DATA = Path(
 LOG_PATH = PLUGIN_DATA / "mem0_self_hosted.log"
 PROTOCOL_VERSION = "2025-03-26"
 MCP_REQUEST_TIMEOUT = 6
+MAX_MCP_RESPONSE_BYTES = 2_000_000
 MAX_MEMORY_TEXT = 50_000
 MAX_TRANSCRIPT_BYTES = 6_000_000
 MAX_IMPORT_FILE_SIZE = 100_000
@@ -211,12 +212,15 @@ def mcp_request(method: str, params: dict[str, Any]) -> dict[str, Any]:
         },
     )
     with urllib.request.urlopen(request, timeout=MCP_REQUEST_TIMEOUT) as response:
+        raw = response.read(MAX_MCP_RESPONSE_BYTES + 1)
+        if len(raw) > MAX_MCP_RESPONSE_BYTES:
+            raise RuntimeError("MCP 响应超过大小限制")
         result = parse_mcp_response(
-            response.read().decode("utf-8"),
+            raw.decode("utf-8"),
             response.headers.get_content_type(),
         )
     if result.get("error"):
-        raise RuntimeError(str(result["error"]))
+        raise RuntimeError("MCP 返回错误")
     return result.get("result", {})
 
 
@@ -1241,19 +1245,42 @@ def _auto_import_project_files(cwd: str | None, project_id: str) -> None:
         path = next((directory / filename for directory in search_dirs if (directory / filename).is_file()), None)
         previous = scope_state.get(filename, {})
         previous_hash = previous.get("sha256", "") if isinstance(previous, dict) else ""
+        previous_format = previous.get("format_version") if isinstance(previous, dict) else None
+        pending = bool(previous.get("pending")) if isinstance(previous, dict) else False
+        fallback_hash = previous.get("previous_hash", "") if pending else ""
+        fallback_format = previous.get("previous_format_version") if pending else None
+        fallback_ids = previous.get("previous_memory_ids", []) if pending else []
+        if not isinstance(fallback_ids, list):
+            fallback_ids = []
+        fallback_ids = [
+            memory_id
+            for memory_id in fallback_ids
+            if isinstance(memory_id, str) and memory_id
+        ]
         if path is None:
-            if isinstance(previous_hash, str) and previous_hash:
+            cleanup_targets = list(
+                dict.fromkeys(
+                    (file_hash, format_version)
+                    for file_hash, format_version in (
+                        (previous_hash, previous_format),
+                        (fallback_hash, fallback_format),
+                    )
+                    if isinstance(file_hash, str) and file_hash
+                )
+            )
+            cleanup_succeeded = bool(cleanup_targets)
+            for old_hash, old_format in cleanup_targets:
                 old_ids = try_find_import_memory_ids(
                     filename,
-                    previous_hash,
+                    old_hash,
                     project_id,
-                    format_version=None,
+                    format_version=old_format if isinstance(old_format, int) else None,
                 )
-                if old_ids is None:
-                    continue
-                if delete_memories(old_ids, project_id):
-                    scope_state.pop(filename, None)
-                    changed = True
+                if old_ids is None or not delete_memories(old_ids, project_id):
+                    cleanup_succeeded = False
+            if cleanup_succeeded:
+                scope_state.pop(filename, None)
+                changed = True
             continue
         try:
             raw = path.read_bytes()
@@ -1262,6 +1289,9 @@ def _auto_import_project_files(cwd: str | None, project_id: str) -> None:
         if len(raw) > MAX_IMPORT_FILE_SIZE:
             continue
         file_hash = hashlib.sha256(raw).hexdigest()
+        cleanup_hash = ""
+        cleanup_format: int | None = None
+        cleanup_ids: list[str] = []
         if (
             isinstance(previous, dict)
             and previous.get("sha256") == file_hash
@@ -1274,30 +1304,66 @@ def _auto_import_project_files(cwd: str | None, project_id: str) -> None:
             if not isinstance(expected_chunks, int) or expected_chunks < 1:
                 expected_chunks = 1
             if len(existing_ids) >= expected_chunks:
+                if fallback_ids:
+                    if not delete_memories(fallback_ids, project_id):
+                        continue
+                elif isinstance(fallback_hash, str) and fallback_hash:
+                    old_ids = try_find_import_memory_ids(
+                        filename,
+                        fallback_hash,
+                        project_id,
+                        format_version=fallback_format if isinstance(fallback_format, int) else None,
+                    )
+                    if old_ids is None or not delete_memories(old_ids, project_id):
+                        continue
                 if previous.get("memory_ids") != existing_ids or previous.get("pending"):
                     previous["memory_ids"] = existing_ids
                     previous.pop("pending", None)
+                    previous.pop("previous_hash", None)
+                    previous.pop("previous_format_version", None)
+                    previous.pop("previous_memory_ids", None)
                     changed = True
                 continue
             if not delete_memories(existing_ids, project_id):
                 continue
+            if isinstance(fallback_hash, str) and fallback_hash:
+                cleanup_hash = fallback_hash
+                cleanup_format = fallback_format if isinstance(fallback_format, int) else None
+                cleanup_ids = list(fallback_ids)
+        else:
+            if pending and isinstance(previous_hash, str) and previous_hash:
+                staged_ids = try_find_import_memory_ids(
+                    filename,
+                    previous_hash,
+                    project_id,
+                    format_version=previous_format if isinstance(previous_format, int) else None,
+                )
+                if staged_ids is None or not delete_memories(staged_ids, project_id):
+                    continue
+                cleanup_hash = fallback_hash if isinstance(fallback_hash, str) else ""
+                cleanup_format = fallback_format if isinstance(fallback_format, int) else None
+                cleanup_ids = list(fallback_ids)
+            elif isinstance(previous_hash, str) and previous_hash:
+                cleanup_hash = previous_hash
+                cleanup_format = previous_format if isinstance(previous_format, int) else None
+                if cleanup_hash == file_hash and cleanup_format is None:
+                    old_ids = try_find_import_memory_ids(
+                        filename,
+                        cleanup_hash,
+                        project_id,
+                        format_version=None,
+                    )
+                    if old_ids is None:
+                        continue
+                    cleanup_ids = old_ids
         content = redact_sensitive(raw.decode("utf-8", errors="replace"))
         chunks = split_import_content(content, filename.lower().endswith(".md"))
-        needs_old_cleanup = (
-            isinstance(previous_hash, str)
-            and previous_hash
-            and (
-                previous_hash != file_hash
-                or not isinstance(previous, dict)
-                or previous.get("format_version") != IMPORT_FORMAT_VERSION
-            )
-        )
-        if needs_old_cleanup:
+        if not chunks and cleanup_hash:
             old_ids = try_find_import_memory_ids(
                 filename,
-                previous_hash,
+                cleanup_hash,
                 project_id,
-                format_version=None,
+                format_version=cleanup_format,
             )
             if old_ids is None or not delete_memories(old_ids, project_id):
                 continue
@@ -1334,6 +1400,12 @@ def _auto_import_project_files(cwd: str | None, project_id: str) -> None:
             "updated_at": datetime.now(timezone.utc).isoformat(),
             "pending": True,
         }
+        if cleanup_hash:
+            scope_state[filename]["previous_hash"] = cleanup_hash
+            if cleanup_format is not None:
+                scope_state[filename]["previous_format_version"] = cleanup_format
+            if cleanup_ids:
+                scope_state[filename]["previous_memory_ids"] = cleanup_ids
         save_import_scope_state(scope, scope_state)
         failed = False
         with ThreadPoolExecutor(max_workers=min(4, len(memories))) as executor:
@@ -1350,6 +1422,18 @@ def _auto_import_project_files(cwd: str | None, project_id: str) -> None:
         if failed or len(new_ids) < len(memories):
             log_error(f"自动导入 {filename} 未能验证全部分块")
             continue
+        if cleanup_ids:
+            if not delete_memories(cleanup_ids, project_id):
+                continue
+        elif cleanup_hash:
+            old_ids = try_find_import_memory_ids(
+                filename,
+                cleanup_hash,
+                project_id,
+                format_version=cleanup_format,
+            )
+            if old_ids is None or not delete_memories(old_ids, project_id):
+                continue
         scope_state[filename] = {
             "sha256": file_hash,
             "format_version": IMPORT_FORMAT_VERSION,
@@ -1840,10 +1924,11 @@ def main() -> int:
             self_test()
             return 0
         except Exception as exc:
-            log_error(f"{type(exc).__name__}: {exc}")
+            error = f"{type(exc).__name__}: {redact_sensitive(str(exc))}"
+            log_error(error)
             print(
                 json.dumps(
-                    {"状态": "失败", "错误": f"{type(exc).__name__}: {exc}"},
+                    {"状态": "失败", "错误": error},
                     ensure_ascii=True,
                 ),
                 file=sys.stderr,
