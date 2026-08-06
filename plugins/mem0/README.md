@@ -28,7 +28,7 @@
 | `Stop` | 通过质量门禁后从最近对话提取长期记忆，并应用保留期限 |
 | `PreCompact` | 在上下文压缩前保存最近对话中的长期信息 |
 
-首次启动还会自动导入 `CLAUDE.md`、`AGENTS.md`、`.cursorrules`、`.windsurfrules` 和 `mem0.md`。导入状态保存在插件数据目录，通过 SHA-256 跳过未变化文件。
+首次启动还会自动导入 `CLAUDE.md`、`AGENTS.md`、`.cursorrules`、`.windsurfrules` 和 `mem0.md`。导入状态保存在插件数据目录，通过来源文件与 SHA-256 跳过未变化内容；短章节会在分块上限内合并，写入前先记录待完成状态，失败或中断后会在下次启动续跑。项目资料被更新、清空或删除时，只清理带有插件精确标记的旧分块；不同项目的并发状态写入会合并保存。
 
 `mem0.md` 还会原生解析 `Settings`、`Search`、`Ignore`、`Identity`、`Categories` 和 `Retention` 六个二级标题。本机 `settings.json` 位于插件数据目录，支持 `auto_save`、`auto_search`、`search_limit`、`confidence_threshold`、`rerank`、`debug` 和 `session_retention_days`；会话总结默认保留 90 天，`Retention` 可按 `metadata.type` 覆盖为天数或永久保留。覆盖顺序为内置默认值、项目 `mem0.md`、本机设置、环境变量；详细格式见仓库根目录 `README.md`。
 

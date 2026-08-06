@@ -2,6 +2,8 @@
 
 本插件运行时只调用 `https://mem0-api.jiang.in/mcp`，并且只使用 `MEM0_MCP_TOKEN` 认证。不得请求 `api.mem0.ai`、`mcp.mem0.ai`，也不得要求 `MEM0_API_KEY`。
 
+钩子客户端兼容 Streamable HTTP 的 `application/json` 与 `text/event-stream` 响应，并按 JSON-RPC 请求 ID 忽略 SSE 中先到达的通知或其他消息。钩子兜底日志只记录异常类型，不记录服务端错误正文、令牌或记忆内容。
+
 ## 工具签名
 
 - `add_memory(text?, messages?, project_id?, infer?, metadata?, run_id?, expiration_date?)`
@@ -49,7 +51,7 @@
 - `Categories` 只指导 `infer=true` 的自动总结分类，不伪装成官方云端类别目录。
 - `Retention` 可按 `metadata.type` 设置分类保留期，例如 `session_summary: 90d`、`compact_summary: 90d`、`decision: forever`；旧的 `days`、`retention_days` 和 `retention_session_days` 继续作为会话总结保留期别名。`exclude`/`ignore` 可排除不应自动保存的内容。
 
-复杂提示最多产生四个确定性查询，客户端并发请求后按记忆 ID 去重；单个查询失败允许使用其他查询的结果。纯确认、寒暄、命中 `Ignore` 的提示不会触发检索。自动总结只有在包含决定、目标、完成事项、验证、风险、待办、文件触达等长期价值信号时才写入；使用 `messages=[{"role":"assistant",...}]` 防止把模型观点误归因给用户，并写入 `type/confidence/session_id/branch/files_touched` 等非保留 metadata。`files_touched` 必须是项目内相对路径，`Stop`、`PreCompact` 与压缩后 `SessionStart` 继续使用摘要哈希和正文哈希去重。
+复杂提示最多产生四个确定性查询，客户端并发请求后按记忆 ID 去重；单个查询失败允许使用其他查询的结果。纯确认、寒暄、命中 `Ignore` 的提示不会触发检索。自动总结只有在包含决定、目标、完成事项、验证、风险、待办、文件触达等长期价值信号时才写入；使用 `messages=[{"role":"assistant",...}]` 防止把模型观点误归因给用户，并写入 `type/confidence/session_id/branch/files_touched` 等非保留 metadata。`files_touched` 必须是项目内相对路径，普通文本和 JSON 形式的凭据必须先脱敏；会话计数和摘要去重状态必须在文件锁内合并更新，`Stop`、`PreCompact` 与压缩后 `SessionStart` 继续使用摘要哈希和正文哈希去重。
 
 仓库中的 `mcp-schema.snapshot.json` 固定 10 个工具的参数、必填项、类型、默认值、枚举和四项 `ToolAnnotations`。`scripts/mem0_self_hosted.py --check` 必须实时比较生产 `tools/list`；差异只报告工具或字段名，不输出 schema 正文、令牌或记忆内容。
 
@@ -60,4 +62,4 @@
 - 两个批量工具必须先省略 `confirmation_token` 获取预览，再向用户展示范围、数量和截止时间；取得明确确认后，原样提交 5 分钟 HMAC 令牌执行。
 - 令牌过期、篡改、范围变化或重复使用时不得重试执行，应重新预览并再次确认。禁止用户级或全局清空。
 
-自动导入继续使用 `[mem0:auto-import]` 正文标记，并且只删除本地状态中记录为插件生成的旧分块。
+自动导入继续使用 `[mem0:auto-import]` 正文标记；不同来源文件不得仅因内容哈希相同而互相跳过，短 Markdown 章节必须合并到受限分块中。新增分块前必须持久化 `pending` 状态，查询、写入、验证或清理失败时不得推进状态，后续启动必须从原状态续跑。项目资料被更新、清空或删除时，只删除本地状态和精确正文标记共同确认由插件生成的旧分块。所有项目范围共用状态文件时，写入必须在共享锁内重新读取并仅合并当前范围，禁止覆盖其他项目状态。

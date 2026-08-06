@@ -101,9 +101,9 @@ Codex 不会自动信任第三方钩子；插件更新并改变钩子内容后�
 | `Stop` | 每轮助手输出结束 | 通过质量门禁后提取长期记忆，并按保留策略设置过期时间 |
 | `PreCompact` | 手动或自动压缩前 | 从最近转录保存压缩前总结 |
 
-`SessionStart` 首次启动时还会扫描 `CLAUDE.md`、`AGENTS.md`、`.cursorrules`、`.windsurfrules` 和 `mem0.md`，按标题分块后以 `infer=false` 导入；本地 SHA-256 状态会跳过未变化内容，文件更新成功后只删除插件此前生成的旧分块。
+`SessionStart` 首次启动时还会扫描 `CLAUDE.md`、`AGENTS.md`、`.cursorrules`、`.windsurfrules` 和 `mem0.md`，按标题分块后以 `infer=false` 导入；本地 SHA-256 状态会跳过未变化内容，文件更新或删除后只清理插件此前生成的旧分块。导入前会先持久化待完成状态，查询、写入或清理暂时失败时保留状态并在下次启动续跑；不同项目并发更新状态时会在同一文件锁内合并，避免互相覆盖。
 
-自动总结读取最近 12 条用户/助手消息，最多处理 50,000 字符，同时记录分支、触达文件和会话内 Mem0 操作计数。写入使用 `messages` 与 `infer=true`，模型生成的正文始终标记为 `assistant`，避免误记为用户观点；metadata 包含 `type`、`confidence`、`session_id`、分支和项目内相对文件路径。写入前会清除常见系统标签并脱敏令牌、密码和认证头；短消息、寒暄和空内容会被跳过，`Stop` 与 `PreCompact` 的相同正文也不会重复保存。
+自动总结读取最近 12 条用户/助手消息，最多处理 50,000 字符，同时记录分支、触达文件和会话内 Mem0 操作计数。写入使用 `messages` 与 `infer=true`，模型生成的正文始终标记为 `assistant`，避免误记为用户观点；metadata 包含 `type`、`confidence`、`session_id`、分支和项目内相对文件路径。写入前会清除常见系统标签并脱敏普通文本及 JSON 中的令牌、密码和认证头；会话状态使用文件锁合并更新，短消息、寒暄和空内容会被跳过，`Stop` 与 `PreCompact` 的相同正文也不会重复保存。
 
 ## 本地设置与 `mem0.md`
 
@@ -230,7 +230,7 @@ python plugins\mem0\scripts\mem0_self_hosted.py --check
 当前实现还通过以下验收：
 
 - 仓库结构、市场配置、六类钩子和 16 个技能校验。
-- 20 项生命周期脚本单元测试。
+- 30 项生命周期脚本单元测试。
 - 生产 `messages + infer=true`、metadata、到期日和 rerank 探针。
 - `update_memory` metadata 合并、置顶取消和单条清理探针。
 - 生产 10 工具契约与 `mcp-schema.snapshot.json` 一致性检查。
