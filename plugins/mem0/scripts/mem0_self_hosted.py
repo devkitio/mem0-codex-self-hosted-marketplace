@@ -15,7 +15,7 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
@@ -25,6 +25,7 @@ PLUGIN_DATA = Path(
 )
 LOG_PATH = PLUGIN_DATA / "mem0_self_hosted.log"
 PROTOCOL_VERSION = "2025-03-26"
+MCP_REQUEST_TIMEOUT = 6
 MAX_MEMORY_TEXT = 50_000
 MAX_TRANSCRIPT_BYTES = 6_000_000
 MAX_IMPORT_FILE_SIZE = 100_000
@@ -72,11 +73,15 @@ SYSTEM_TAG_PATTERN = re.compile(
     r"</(?:system-reminder|private|persisted-output|system_instruction)>",
     re.DOTALL,
 )
-SECRET_PATTERNS = (
-    re.compile(r"(?i)(authorization\s*[:=]\s*(?:bearer|token)\s+)[^\s,;]+"),
-    re.compile(r"(?i)((?:api[_-]?key|token|password|passwd|secret)\s*[:=]\s*)[^\s,;]+"),
-    re.compile(r"(?i)(https?://[^\s/@:]+:)[^\s/@]+@"),
+AUTH_SECRET_PATTERN = re.compile(
+    r'''(?ix)(?P<prefix>["']?authorization["']?\s*[:=]\s*)'''
+    r'''(?P<value>"[^"\r\n]*"|'[^'\r\n]*'|(?:bearer|token)\s+[^\s,;]+)'''
 )
+NAMED_SECRET_PATTERN = re.compile(
+    r'''(?ix)(?P<prefix>["']?(?:api[_-]?key|token|password|passwd|secret)["']?\s*[:=]\s*)'''
+    r'''(?P<value>"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;]+)'''
+)
+URL_CREDENTIAL_PATTERN = re.compile(r"(?i)(https?://[^\s/@:]+:)[^\s/@]+@")
 PRIVATE_KEY_PATTERN = re.compile(
     r"-----BEGIN [^-\r\n]*PRIVATE KEY-----.*?-----END [^-\r\n]*PRIVATE KEY-----",
     re.DOTALL,
@@ -161,6 +166,31 @@ def load_connection() -> tuple[str, str]:
     return url, token
 
 
+def parse_mcp_response(body: str, content_type: str, request_id: int = 1) -> dict[str, Any]:
+    payloads: list[Any] = []
+    if content_type.split(";", 1)[0].strip().casefold() == "text/event-stream":
+        data_lines: list[str] = []
+        for line in [*body.splitlines(), ""]:
+            if line.startswith("data:"):
+                data_lines.append(line[5:].lstrip())
+            elif not line and data_lines:
+                payloads.append(json.loads("\n".join(data_lines)))
+                data_lines = []
+    else:
+        payloads.append(json.loads(body))
+
+    for payload in payloads:
+        messages = payload if isinstance(payload, list) else [payload]
+        for message in messages:
+            if (
+                isinstance(message, dict)
+                and message.get("id") == request_id
+                and ("result" in message or "error" in message)
+            ):
+                return message
+    raise RuntimeError("MCP 响应缺少匹配当前请求的结果")
+
+
 def mcp_request(method: str, params: dict[str, Any]) -> dict[str, Any]:
     """使用无状态 Streamable HTTP 调用自托管 MCP。"""
     url, token = load_connection()
@@ -180,8 +210,11 @@ def mcp_request(method: str, params: dict[str, Any]) -> dict[str, Any]:
             "User-Agent": "codex-mem0-self-hosted-hook/2.0",
         },
     )
-    with urllib.request.urlopen(request, timeout=15) as response:
-        result = json.loads(response.read().decode("utf-8"))
+    with urllib.request.urlopen(request, timeout=MCP_REQUEST_TIMEOUT) as response:
+        result = parse_mcp_response(
+            response.read().decode("utf-8"),
+            response.headers.get_content_type(),
+        )
     if result.get("error"):
         raise RuntimeError(str(result["error"]))
     return result.get("result", {})
@@ -666,9 +699,15 @@ def tail_jsonl(path: str, max_bytes: int = MAX_TRANSCRIPT_BYTES) -> list[dict[st
 
 
 def redact_sensitive(text: str) -> str:
+    def replace_assignment(match: re.Match[str]) -> str:
+        value = match.group("value")
+        quote = value[0] if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'" else ""
+        return f"{match.group('prefix')}{quote}[已脱敏]{quote}"
+
     value = PRIVATE_KEY_PATTERN.sub("[私钥已脱敏]", text)
-    for pattern in SECRET_PATTERNS:
-        value = pattern.sub(r"\1[已脱敏]", value)
+    value = AUTH_SECRET_PATTERN.sub(replace_assignment, value)
+    value = NAMED_SECRET_PATTERN.sub(replace_assignment, value)
+    value = URL_CREDENTIAL_PATTERN.sub(r"\1[已脱敏]@", value)
     return value
 
 
@@ -802,17 +841,39 @@ def load_session_stats(session_id: str) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def update_session_state(
+    session_id: str,
+    update: Callable[[dict[str, Any]], None],
+) -> bool:
+    if not session_id:
+        return False
+    path = session_state_path(session_id)
+    lock_path = path.with_suffix(".lock")
+    if not wait_for_lock(lock_path, timeout=2, stale_after=10):
+        log_error("等待会话状态锁超时")
+        return False
+    try:
+        state = load_session_stats(session_id)
+        update(state)
+        atomic_write_json(path, state)
+        return True
+    finally:
+        release_lock(lock_path)
+
+
 def update_session_stats(session_id: str, operation: str) -> None:
     if not session_id:
         return
-    state = load_session_stats(session_id)
-    operations = state.setdefault("operations", {})
-    if not isinstance(operations, dict):
-        operations = {}
-        state["operations"] = operations
-    operations[operation] = int(operations.get(operation, 0)) + 1
-    state.setdefault("started", datetime.now(timezone.utc).isoformat())
-    atomic_write_json(session_state_path(session_id), state)
+
+    def increment(state: dict[str, Any]) -> None:
+        operations = state.setdefault("operations", {})
+        if not isinstance(operations, dict):
+            operations = {}
+            state["operations"] = operations
+        operations[operation] = int(operations.get(operation, 0)) + 1
+        state.setdefault("started", datetime.now(timezone.utc).isoformat())
+
+    update_session_state(session_id, increment)
 
 
 def summary_was_saved(session_id: str, kind: str, digest: str) -> bool:
@@ -823,16 +884,18 @@ def summary_was_saved(session_id: str, kind: str, digest: str) -> bool:
     return isinstance(summaries, dict) and summaries.get(kind) == digest
 
 
-def mark_summary_saved(session_id: str, kind: str, digest: str) -> None:
+def mark_summaries_saved(session_id: str, digests: dict[str, str]) -> None:
     if not session_id:
         return
-    state = load_session_stats(session_id)
-    summaries = state.setdefault("summaries", {})
-    if not isinstance(summaries, dict):
-        summaries = {}
-        state["summaries"] = summaries
-    summaries[kind] = digest
-    atomic_write_json(session_state_path(session_id), state)
+
+    def mark(state: dict[str, Any]) -> None:
+        summaries = state.setdefault("summaries", {})
+        if not isinstance(summaries, dict):
+            summaries = {}
+            state["summaries"] = summaries
+        summaries.update(digests)
+
+    update_session_state(session_id, mark)
 
 
 def should_save_summary(text: str, files: list[str], policy: dict[str, Any]) -> bool:
@@ -984,9 +1047,27 @@ def save_summary(
     if retention_days > 0:
         expiration = datetime.now(timezone.utc) + timedelta(days=retention_days)
         arguments["expiration_date"] = expiration.date().isoformat()
-    call_tool("add_memory", arguments)
-    mark_summary_saved(session_id, kind, digest)
-    mark_summary_saved(session_id, "content", content_digest)
+    summary_lock = session_state_path(session_id).with_suffix(".summary.lock") if session_id else None
+    if summary_lock and not wait_for_lock(summary_lock, timeout=20, stale_after=30):
+        log_error("等待会话摘要锁超时")
+        return
+    try:
+        if session_id and (
+            summary_was_saved(session_id, kind, digest)
+            or summary_was_saved(session_id, "content", content_digest)
+        ):
+            return
+        call_tool("add_memory", arguments)
+        mark_summaries_saved(
+            session_id,
+            {
+                kind: digest,
+                "content": content_digest,
+            },
+        )
+    finally:
+        if summary_lock:
+            release_lock(summary_lock)
 
 
 def split_import_content(content: str, markdown: bool) -> list[str]:
@@ -1004,13 +1085,16 @@ def split_import_content(content: str, markdown: bool) -> list[str]:
     else:
         raw_chunks = [content]
 
-    chunks: list[str] = []
-    for raw in raw_chunks:
-        for start in range(0, len(raw), MAX_IMPORT_CHUNK_SIZE):
-            chunk = raw[start : start + MAX_IMPORT_CHUNK_SIZE].strip()
-            if len(chunk) >= MIN_IMPORT_CHUNK_SIZE:
-                chunks.append(chunk)
-    return chunks
+    normalized = "\n\n".join(raw.strip() for raw in raw_chunks if raw.strip())
+    if len(normalized) < MIN_IMPORT_CHUNK_SIZE:
+        return []
+    chunk_count = math.ceil(len(normalized) / MAX_IMPORT_CHUNK_SIZE)
+    chunk_size = math.ceil(len(normalized) / chunk_count)
+    chunks = [
+        normalized[start : start + chunk_size].strip()
+        for start in range(0, len(normalized), chunk_size)
+    ]
+    return [chunk for chunk in chunks if chunk]
 
 
 def import_state_path() -> Path:
@@ -1022,12 +1106,15 @@ def import_scope_key(root: Path, project_id: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
-def delete_memories(memory_ids: list[str], project_id: str) -> None:
+def delete_memories(memory_ids: list[str], project_id: str) -> bool:
+    succeeded = True
     for memory_id in dict.fromkeys(memory_ids):
         try:
             call_tool("delete_memory", {"memory_id": memory_id, "project_id": project_id})
         except Exception as exc:
+            succeeded = False
             log_error(f"清理旧导入记忆失败 {type(exc).__name__}")
+    return succeeded
 
 
 def find_import_memory_ids(
@@ -1064,17 +1151,17 @@ def find_import_memory_ids(
     return list(dict.fromkeys(ids))
 
 
-def safe_find_import_memory_ids(
+def try_find_import_memory_ids(
     filename: str,
     file_hash: str,
     project_id: str,
     format_version: int | None = IMPORT_FORMAT_VERSION,
-) -> list[str]:
+) -> list[str] | None:
     try:
         return find_import_memory_ids(filename, file_hash, project_id, format_version)
     except Exception as exc:
         log_error(f"核对自动导入记忆失败 {type(exc).__name__}")
-        return []
+        return None
 
 
 def add_import_chunk(text: str, project_id: str) -> None:
@@ -1089,7 +1176,7 @@ def acquire_lock(path: Path, stale_after: int = 120) -> bool:
         os.write(descriptor, str(os.getpid()).encode("ascii"))
         os.close(descriptor)
         return True
-    except FileExistsError:
+    except (FileExistsError, PermissionError):
         try:
             if time.time() - path.stat().st_mtime > stale_after:
                 path.unlink()
@@ -1097,6 +1184,40 @@ def acquire_lock(path: Path, stale_after: int = 120) -> bool:
         except OSError:
             pass
         return False
+
+
+def wait_for_lock(path: Path, timeout: float, stale_after: int = 120) -> bool:
+    deadline = time.monotonic() + timeout
+    while not acquire_lock(path, stale_after):
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.05)
+    return True
+
+
+def release_lock(path: Path) -> None:
+    try:
+        path.unlink()
+    except OSError:
+        pass
+
+
+def save_import_scope_state(scope: str, scope_state: dict[str, Any]) -> None:
+    """合并写入单个项目范围，避免并发覆盖其他项目状态。"""
+    lock_path = PLUGIN_DATA / "auto_import_state.lock"
+    if not wait_for_lock(lock_path, timeout=5):
+        raise TimeoutError("等待自动导入状态锁超时")
+    try:
+        state = load_json_file(import_state_path(), {})
+        if not isinstance(state, dict):
+            state = {}
+        if scope_state:
+            state[scope] = scope_state
+        else:
+            state.pop(scope, None)
+        atomic_write_json(import_state_path(), state)
+    finally:
+        release_lock(lock_path)
 
 
 def _auto_import_project_files(cwd: str | None, project_id: str) -> None:
@@ -1114,12 +1235,25 @@ def _auto_import_project_files(cwd: str | None, project_id: str) -> None:
     if not isinstance(scope_state, dict):
         scope_state = {}
         state[scope] = scope_state
-    seen_hashes: set[str] = set()
     changed = False
 
     for filename in TARGET_PROJECT_FILES:
         path = next((directory / filename for directory in search_dirs if (directory / filename).is_file()), None)
+        previous = scope_state.get(filename, {})
+        previous_hash = previous.get("sha256", "") if isinstance(previous, dict) else ""
         if path is None:
+            if isinstance(previous_hash, str) and previous_hash:
+                old_ids = try_find_import_memory_ids(
+                    filename,
+                    previous_hash,
+                    project_id,
+                    format_version=None,
+                )
+                if old_ids is None:
+                    continue
+                if delete_memories(old_ids, project_id):
+                    scope_state.pop(filename, None)
+                    changed = True
             continue
         try:
             raw = path.read_bytes()
@@ -1128,28 +1262,49 @@ def _auto_import_project_files(cwd: str | None, project_id: str) -> None:
         if len(raw) > MAX_IMPORT_FILE_SIZE:
             continue
         file_hash = hashlib.sha256(raw).hexdigest()
-        if file_hash in seen_hashes:
-            continue
-        seen_hashes.add(file_hash)
-        previous = scope_state.get(filename, {})
         if (
             isinstance(previous, dict)
             and previous.get("sha256") == file_hash
             and previous.get("format_version") == IMPORT_FORMAT_VERSION
         ):
-            existing_ids = safe_find_import_memory_ids(filename, file_hash, project_id)
+            existing_ids = try_find_import_memory_ids(filename, file_hash, project_id)
+            if existing_ids is None:
+                continue
             expected_chunks = previous.get("chunks", 1)
             if not isinstance(expected_chunks, int) or expected_chunks < 1:
                 expected_chunks = 1
             if len(existing_ids) >= expected_chunks:
-                if previous.get("memory_ids") != existing_ids:
+                if previous.get("memory_ids") != existing_ids or previous.get("pending"):
                     previous["memory_ids"] = existing_ids
+                    previous.pop("pending", None)
                     changed = True
                 continue
-            delete_memories(existing_ids, project_id)
+            if not delete_memories(existing_ids, project_id):
+                continue
         content = redact_sensitive(raw.decode("utf-8", errors="replace"))
         chunks = split_import_content(content, filename.lower().endswith(".md"))
+        needs_old_cleanup = (
+            isinstance(previous_hash, str)
+            and previous_hash
+            and (
+                previous_hash != file_hash
+                or not isinstance(previous, dict)
+                or previous.get("format_version") != IMPORT_FORMAT_VERSION
+            )
+        )
+        if needs_old_cleanup:
+            old_ids = try_find_import_memory_ids(
+                filename,
+                previous_hash,
+                project_id,
+                format_version=None,
+            )
+            if old_ids is None or not delete_memories(old_ids, project_id):
+                continue
         if not chunks:
+            if filename in scope_state:
+                scope_state.pop(filename, None)
+                changed = True
             continue
         branch = resolve_branch(str(root))
         memories = [
@@ -1171,6 +1326,15 @@ def _auto_import_project_files(cwd: str | None, project_id: str) -> None:
             )
             for index, chunk in enumerate(chunks, 1)
         ]
+        scope_state[filename] = {
+            "sha256": file_hash,
+            "format_version": IMPORT_FORMAT_VERSION,
+            "memory_ids": [],
+            "chunks": len(chunks),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "pending": True,
+        }
+        save_import_scope_state(scope, scope_state)
         failed = False
         with ThreadPoolExecutor(max_workers=min(4, len(memories))) as executor:
             futures = [executor.submit(add_import_chunk, memory, project_id) for memory in memories]
@@ -1180,24 +1344,12 @@ def _auto_import_project_files(cwd: str | None, project_id: str) -> None:
                 except Exception as exc:
                     failed = True
                     log_error(f"自动导入 {filename} 失败 {type(exc).__name__}")
-        new_ids = safe_find_import_memory_ids(filename, file_hash, project_id)
-        if failed:
-            delete_memories(new_ids, project_id)
+        new_ids = try_find_import_memory_ids(filename, file_hash, project_id)
+        if new_ids is None:
             continue
-        if len(new_ids) < len(memories):
-            delete_memories(new_ids, project_id)
+        if failed or len(new_ids) < len(memories):
             log_error(f"自动导入 {filename} 未能验证全部分块")
             continue
-        previous_hash = previous.get("sha256", "") if isinstance(previous, dict) else ""
-        if isinstance(previous_hash, str) and previous_hash:
-            old_ids = safe_find_import_memory_ids(
-                filename,
-                previous_hash,
-                project_id,
-                format_version=None,
-            )
-            current_ids = set(new_ids)
-            delete_memories([memory_id for memory_id in old_ids if memory_id not in current_ids], project_id)
         scope_state[filename] = {
             "sha256": file_hash,
             "format_version": IMPORT_FORMAT_VERSION,
@@ -1208,7 +1360,7 @@ def _auto_import_project_files(cwd: str | None, project_id: str) -> None:
         changed = True
 
     if changed:
-        atomic_write_json(import_state_path(), state)
+        save_import_scope_state(scope, scope_state)
 
 
 def auto_import_project_files(cwd: str | None, project_id: str) -> None:
@@ -1231,17 +1383,7 @@ def normalized_tool_name(tool_name: str) -> str:
 
 def tool_paths(tool_input: Any) -> list[str]:
     found: set[str] = set()
-    if isinstance(tool_input, dict):
-        for key in ("file_path", "path"):
-            value = tool_input.get(key)
-            if isinstance(value, str) and value.strip():
-                found.add(value.strip())
-        command = tool_input.get("command")
-        if isinstance(command, str):
-            for line in command.splitlines():
-                match = re.match(r"\*\*\* (?:Add|Update|Delete) File: (.+)", line)
-                if match:
-                    found.add(match.group(1).strip())
+    collect_file_paths(tool_input, found)
     return sorted(found)
 
 
@@ -1283,7 +1425,10 @@ def file_context(
     except (OSError, ValueError):
         return ""
     relative = str(resolved.relative_to(root)).replace("\\", "/")
-    if any(part in {".git", "node_modules", "target", "vendor"} for part in resolved.parts):
+    if any(
+        part.casefold() in {".git", "node_modules", "target", "vendor"}
+        for part in resolved.parts
+    ):
         return ""
     if resolved.name.casefold().startswith(".env"):
         return ""
@@ -1712,7 +1857,7 @@ def main() -> int:
         handle_event(hook_input)
         return 0
     except Exception as exc:
-        log_error(f"{type(exc).__name__}: {exc}")
+        log_error(f"钩子执行失败 {type(exc).__name__}")
         event = ""
         try:
             event = str(locals().get("hook_input", {}).get("hook_event_name", ""))

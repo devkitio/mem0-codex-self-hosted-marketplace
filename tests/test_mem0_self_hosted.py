@@ -6,6 +6,7 @@ import io
 import json
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import redirect_stdout
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,6 +18,19 @@ SPEC = importlib.util.spec_from_file_location("mem0_self_hosted", SCRIPT)
 assert SPEC and SPEC.loader
 mem0 = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(mem0)
+DOC_SCRIPT = (
+    Path(__file__).resolve().parents[1]
+    / "plugins"
+    / "mem0"
+    / "skills"
+    / "mem0"
+    / "scripts"
+    / "mem0_doc_search.py"
+)
+DOC_SPEC = importlib.util.spec_from_file_location("mem0_doc_search", DOC_SCRIPT)
+assert DOC_SPEC and DOC_SPEC.loader
+mem0_docs = importlib.util.module_from_spec(DOC_SPEC)
+DOC_SPEC.loader.exec_module(mem0_docs)
 
 
 class Mem0SelfHostedTests(unittest.TestCase):
@@ -25,6 +39,78 @@ class Mem0SelfHostedTests(unittest.TestCase):
         with redirect_stdout(output):
             function(*args)
         return json.loads(output.getvalue())
+
+    def test_MCP_响应兼容_JSON_批次和_SSE(self):
+        json_batch = json.dumps(
+            [
+                {"jsonrpc": "2.0", "id": 2, "result": {"ignored": True}},
+                {"jsonrpc": "2.0", "id": 1, "result": {"状态": "通过"}},
+            ],
+            ensure_ascii=False,
+        )
+        self.assertEqual(
+            mem0.parse_mcp_response(json_batch, "application/json")["result"]["状态"],
+            "通过",
+        )
+
+        sse = (
+            'event: message\n'
+            'data: {"jsonrpc":"2.0","method":"notifications/progress"}\n\n'
+            'event: message\n'
+            'data: [{"jsonrpc":"2.0","id":1,"result":{"状态":"通过"}}]\n\n'
+        )
+        self.assertEqual(
+            mem0.parse_mcp_response(sse, "text/event-stream; charset=utf-8")["result"]["状态"],
+            "通过",
+        )
+
+    def test_钩子失败日志不记录异常正文(self):
+        output = io.StringIO()
+        with mock.patch.object(mem0.sys, "argv", [str(SCRIPT)]), mock.patch.object(
+            mem0.sys,
+            "stdin",
+            io.StringIO("{}"),
+        ), mock.patch.object(
+            mem0,
+            "handle_event",
+            side_effect=RuntimeError("Authorization: Bearer secret-value"),
+        ), mock.patch.object(mem0, "log_error") as log, redirect_stdout(output):
+            status = mem0.main()
+
+        self.assertEqual(status, 0)
+        self.assertNotIn("secret-value", log.call_args.args[0])
+        self.assertEqual(json.loads(output.getvalue()), {})
+
+    def test_JSON_形式敏感信息会脱敏(self):
+        original = json.dumps(
+            {
+                "token": "token-secret",
+                "password": "password-secret",
+                "authorization": "Bearer auth-secret",
+            }
+        )
+        redacted = mem0.redact_sensitive(original)
+
+        self.assertNotIn("token-secret", redacted)
+        self.assertNotIn("password-secret", redacted)
+        self.assertNotIn("auth-secret", redacted)
+        self.assertEqual(redacted.count("[已脱敏]"), 3)
+
+    def test_自动导入会合并短章节并限制分块数量(self):
+        short_sections = "\n".join(
+            f"## 规则 {index}\n必须执行第 {index} 项验证。" for index in range(8)
+        )
+        chunks = mem0.split_import_content(short_sections, True)
+        self.assertTrue(chunks)
+        self.assertIn("规则 0", "\n".join(chunks))
+        self.assertIn("规则 7", "\n".join(chunks))
+
+        many_sections = "\n".join(
+            f"## 规则 {index}\n" + "必须测试。" * 10 for index in range(60)
+        )
+        many_chunks = mem0.split_import_content(many_sections, True)
+        self.assertLessEqual(len(many_chunks), 50)
+        self.assertTrue(all(len(chunk) <= mem0.MAX_IMPORT_CHUNK_SIZE for chunk in many_chunks))
 
     def test_pretool_自动补齐项目范围(self):
         value = self.capture_json(
@@ -126,7 +212,7 @@ class Mem0SelfHostedTests(unittest.TestCase):
             mem0.handle_pre_tool,
             {
                 "tool_name": "apply_patch",
-                "tool_input": {"command": "*** Update File: .codex/memories/MEMORY.md\n"},
+                "tool_input": {"patch": "*** Update File: .codex/memories/MEMORY.md\n"},
             },
             "demo-project",
         )
@@ -161,7 +247,7 @@ class Mem0SelfHostedTests(unittest.TestCase):
             self.assertEqual(call.call_args.args[0], "search_memories")
             self.assertEqual(call.call_args.args[1]["project_id"], "demo-project")
 
-    def test_项目文件按哈希导入并替换旧分块(self):
+    def test_项目文件按哈希导入替换并清理已删除文件(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             data = root / "plugin-data"
@@ -175,6 +261,7 @@ class Mem0SelfHostedTests(unittest.TestCase):
             calls: list[tuple[str, dict]] = []
             next_id = 0
             memories: dict[str, str] = {}
+            fail_search = False
 
             def fake_call(name, arguments):
                 nonlocal next_id
@@ -184,6 +271,8 @@ class Mem0SelfHostedTests(unittest.TestCase):
                     memories[f"m-{next_id}"] = arguments["text"]
                     return {}
                 if name == "search_memories":
+                    if fail_search:
+                        raise RuntimeError("临时查询失败")
                     return {
                         "structuredContent": {
                             "results": [
@@ -216,11 +305,184 @@ class Mem0SelfHostedTests(unittest.TestCase):
                 self.assertGreater(sum(name == "add_memory" for name, _ in calls), first_add_count)
                 agents.write_text("## 约定\n" + "必须运行全部测试。\n" * 20, encoding="utf-8")
                 mem0.auto_import_project_files(str(root), "demo-project")
+                agents.unlink()
+                fail_search = True
+                mem0.auto_import_project_files(str(root), "demo-project")
+                state = mem0.load_json_file(data / "auto_import_state.json", {})
+                scope = mem0.import_scope_key(root, "demo-project")
+                self.assertIn("AGENTS.md", state.get(scope, {}))
+
+                fail_search = False
+                mem0.auto_import_project_files(str(root), "demo-project")
+                state = mem0.load_json_file(data / "auto_import_state.json", {})
+                self.assertNotIn("AGENTS.md", state.get(scope, {}))
 
             self.assertGreater(sum(name == "add_memory" for name, _ in calls), first_add_count)
             deletes = [arguments for name, arguments in calls if name == "delete_memory"]
             self.assertTrue(deletes)
             self.assertTrue(all(arguments["memory_id"].startswith("m-") for arguments in deletes))
+            self.assertFalse(memories)
+
+    def test_自动导入失败可续跑且空文件会清理旧记忆(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            data = root / "plugin-data"
+            agents = root / "AGENTS.md"
+            agents.write_text("## 规则\n" + "必须验证旧流程。\n" * 20, encoding="utf-8")
+            memories: dict[str, str] = {}
+            add_count = 0
+            fail_search = True
+            fail_delete = False
+
+            def fake_call(name, arguments):
+                nonlocal add_count
+                if name == "add_memory":
+                    add_count += 1
+                    memories[f"m-{add_count}"] = arguments["text"]
+                    return {}
+                if name == "search_memories":
+                    if fail_search:
+                        raise RuntimeError("临时查询失败")
+                    return {
+                        "structuredContent": {
+                            "results": [
+                                {"id": memory_id, "memory": text}
+                                for memory_id, text in memories.items()
+                            ]
+                        }
+                    }
+                if name == "delete_memory":
+                    if fail_delete:
+                        raise RuntimeError("临时删除失败")
+                    memories.pop(arguments["memory_id"], None)
+                return {}
+
+            with mock.patch.object(mem0, "PLUGIN_DATA", data), mock.patch.object(
+                mem0, "git_root", return_value=root
+            ), mock.patch.object(mem0, "resolve_branch", return_value="main"), mock.patch.object(
+                mem0, "call_tool", side_effect=fake_call
+            ):
+                mem0.auto_import_project_files(str(root), "demo-project")
+                scope = mem0.import_scope_key(root, "demo-project")
+                state = mem0.load_json_file(data / "auto_import_state.json", {})
+                self.assertTrue(state[scope]["AGENTS.md"]["pending"])
+                self.assertEqual(add_count, 1)
+
+                fail_search = False
+                mem0.auto_import_project_files(str(root), "demo-project")
+                state = mem0.load_json_file(data / "auto_import_state.json", {})
+                self.assertNotIn("pending", state[scope]["AGENTS.md"])
+                self.assertEqual(add_count, 1)
+
+                fail_search = True
+                mem0.auto_import_project_files(str(root), "demo-project")
+                self.assertEqual(add_count, 1)
+
+                fail_search = False
+                old_hash = state[scope]["AGENTS.md"]["sha256"]
+                agents.write_text("## 规则\n" + "必须验证新流程。\n" * 20, encoding="utf-8")
+                fail_delete = True
+                mem0.auto_import_project_files(str(root), "demo-project")
+                state = mem0.load_json_file(data / "auto_import_state.json", {})
+                self.assertEqual(state[scope]["AGENTS.md"]["sha256"], old_hash)
+                self.assertEqual(add_count, 1)
+
+                fail_delete = False
+                mem0.auto_import_project_files(str(root), "demo-project")
+                state = mem0.load_json_file(data / "auto_import_state.json", {})
+                self.assertNotEqual(state[scope]["AGENTS.md"]["sha256"], old_hash)
+                self.assertEqual(add_count, 2)
+
+                agents.write_text("", encoding="utf-8")
+                mem0.auto_import_project_files(str(root), "demo-project")
+                state = mem0.load_json_file(data / "auto_import_state.json", {})
+                self.assertNotIn("AGENTS.md", state.get(scope, {}))
+                self.assertFalse(memories)
+
+    def test_自动导入状态并发合并不同项目(self):
+        with tempfile.TemporaryDirectory() as directory:
+            data = Path(directory) / "plugin-data"
+            scopes = [f"scope-{index}" for index in range(12)]
+            with mock.patch.object(mem0, "PLUGIN_DATA", data), ThreadPoolExecutor(
+                max_workers=6
+            ) as executor:
+                futures = [
+                    executor.submit(
+                        mem0.save_import_scope_state,
+                        scope,
+                        {"AGENTS.md": {"sha256": scope}},
+                    )
+                    for scope in scopes
+                ]
+                for future in futures:
+                    future.result()
+
+            state = mem0.load_json_file(data / "auto_import_state.json", {})
+            self.assertEqual(set(state), set(scopes))
+            self.assertTrue(all(state[scope]["AGENTS.md"]["sha256"] == scope for scope in scopes))
+
+    def test_相同内容的不同项目文件会分别更新(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            data = root / "plugin-data"
+            agents = root / "AGENTS.md"
+            claude = root / "CLAUDE.md"
+            agents.write_text("## 旧规则\n" + "保留旧规则。\n" * 20, encoding="utf-8")
+            memories: dict[str, str] = {}
+            next_id = 0
+
+            def fake_call(name, arguments):
+                nonlocal next_id
+                if name == "add_memory":
+                    next_id += 1
+                    memories[f"m-{next_id}"] = arguments["text"]
+                elif name == "search_memories":
+                    return {
+                        "structuredContent": {
+                            "results": [
+                                {"id": memory_id, "memory": text}
+                                for memory_id, text in memories.items()
+                            ]
+                        }
+                    }
+                elif name == "delete_memory":
+                    memories.pop(arguments["memory_id"], None)
+                return {}
+
+            with mock.patch.object(mem0, "PLUGIN_DATA", data), mock.patch.object(
+                mem0, "git_root", return_value=root
+            ), mock.patch.object(mem0, "resolve_branch", return_value="main"), mock.patch.object(
+                mem0, "call_tool", side_effect=fake_call
+            ):
+                mem0.auto_import_project_files(str(root), "demo-project")
+                shared = "## 共享规则\n" + "必须执行共享验证。\n" * 20
+                agents.write_text(shared, encoding="utf-8")
+                claude.write_text(shared, encoding="utf-8")
+                mem0.auto_import_project_files(str(root), "demo-project")
+
+            state = mem0.load_json_file(data / "auto_import_state.json", {})
+            scope_state = state[mem0.import_scope_key(root, "demo-project")]
+            self.assertEqual(scope_state["AGENTS.md"]["sha256"], scope_state["CLAUDE.md"]["sha256"])
+            imported = "\n".join(memories.values())
+            self.assertIn("来源文件：AGENTS.md", imported)
+            self.assertIn("来源文件：CLAUDE.md", imported)
+            self.assertNotIn("保留旧规则", imported)
+
+    def test_会话统计并发更新不会丢失(self):
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
+            mem0,
+            "PLUGIN_DATA",
+            Path(directory) / "data",
+        ), ThreadPoolExecutor(max_workers=8) as executor:
+            futures = [
+                executor.submit(mem0.update_session_stats, "session-1", "search_memories")
+                for _ in range(40)
+            ]
+            for future in futures:
+                future.result()
+
+            state = mem0.load_session_stats("session-1")
+            self.assertEqual(state["operations"]["search_memories"], 40)
 
     def test_项目范围映射可持久保存和恢复(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -331,15 +593,41 @@ class Mem0SelfHostedTests(unittest.TestCase):
                 mem0, "resolve_branch", return_value="main"
             ), mock.patch.object(mem0, "call_tool", side_effect=lambda *args: calls.append(args) or {}):
                 text = "用户确认需要保留这个架构决定。" * 10
-                mem0.save_summary(text, "demo-project", "本轮会话总结", hook_input, ["src/app.py"])
-                mem0.save_summary(
-                    text,
-                    "demo-project",
-                    "上下文压缩前总结",
-                    hook_input,
-                    ["src/app.py"],
-                )
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    futures = [
+                        executor.submit(
+                            mem0.save_summary,
+                            text,
+                            "demo-project",
+                            kind,
+                            hook_input,
+                            ["src/app.py"],
+                        )
+                        for kind in ("本轮会话总结", "上下文压缩前总结")
+                    ]
+                    for future in futures:
+                        future.result()
             self.assertEqual(len(calls), 1)
+
+    def test_文档搜索只允许官方主机(self):
+        with mock.patch.object(mem0_docs, "fetch_url") as fetch:
+            result = mem0_docs.fetch_page("http://127.0.0.1:8080/private")
+            invalid_port = mem0_docs.fetch_page("https://docs.mem0.ai:invalid/page")
+        self.assertIn("error", result)
+        self.assertIn("error", invalid_port)
+        fetch.assert_not_called()
+
+    def test_文档搜索限制响应大小(self):
+        response = mock.MagicMock()
+        response.read.return_value = b"x" * (mem0_docs.MAX_RESPONSE_BYTES + 1)
+        context = mock.MagicMock()
+        context.__enter__.return_value = response
+        context.__exit__.return_value = False
+        with mock.patch.object(mem0_docs.urllib.request, "urlopen", return_value=context):
+            result = mem0_docs.fetch_url("https://docs.mem0.ai/llms.txt")
+
+        self.assertIn("超过大小限制", result)
+        response.read.assert_called_once_with(mem0_docs.MAX_RESPONSE_BYTES + 1)
 
     def test_压缩后会话启动提取并保存真实摘要(self):
         with tempfile.TemporaryDirectory() as directory:

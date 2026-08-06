@@ -30,6 +30,7 @@ import urllib.request
 DOCS_BASE = "https://docs.mem0.ai"
 SEARCH_ENDPOINT = f"{DOCS_BASE}/api/search"
 LLMS_INDEX = f"{DOCS_BASE}/llms.txt"
+MAX_RESPONSE_BYTES = 2_000_000
 
 # Known documentation sections for targeted retrieval
 SECTION_MAP = {
@@ -77,7 +78,10 @@ def fetch_url(url: str) -> str:
     req = urllib.request.Request(url, headers={"User-Agent": "Mem0DocSearchAgent/1.0"})
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
-            return resp.read().decode("utf-8")
+            raw = resp.read(MAX_RESPONSE_BYTES + 1)
+            if len(raw) > MAX_RESPONSE_BYTES:
+                return "响应内容超过大小限制"
+            return raw.decode("utf-8")
     except urllib.error.HTTPError as e:
         return f"HTTP Error {e.code}: {e.reason}"
     except urllib.error.URLError as e:
@@ -102,7 +106,7 @@ def search_docs(query: str, section: str | None = None) -> dict:
                 section_paths = SECTION_MAP[section]
                 results = [r for r in results if any(r.get("url", "").startswith(p) for p in section_paths)]
             return {"source": "mintlify_search", "results": results}
-    except (json.JSONDecodeError, Exception):
+    except Exception:
         pass
 
     # Fallback: search llms.txt index for matching URLs
@@ -132,6 +136,19 @@ def search_docs(query: str, section: str | None = None) -> dict:
 def fetch_page(page_path: str) -> dict:
     """Fetch a specific documentation page."""
     url = f"{DOCS_BASE}{page_path}" if page_path.startswith("/") else page_path
+    parsed = urllib.parse.urlsplit(url)
+    try:
+        allowed = (
+            parsed.scheme == "https"
+            and parsed.hostname == "docs.mem0.ai"
+            and parsed.port in {None, 443}
+            and not parsed.username
+            and not parsed.password
+        )
+    except ValueError:
+        allowed = False
+    if not allowed:
+        return {"error": "只允许读取 https://docs.mem0.ai 下的文档页面"}
     content = fetch_url(url)
     return {"url": url, "content": content[:10000], "truncated": len(content) > 10000}
 

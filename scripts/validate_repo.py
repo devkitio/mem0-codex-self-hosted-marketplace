@@ -112,6 +112,13 @@ def main() -> None:
         "expiration_date",
     ]
     assert snapshot_tools["get_memories"]["enums"]["sort_order"] == ["asc", "desc"]
+    for name in BULK_TOOLS:
+        assert "confirmation_token" in snapshot_tools[name]["properties"], (
+            f"{name} 快照缺少两阶段确认令牌"
+        )
+        assert "confirmation_token" not in snapshot_tools[name]["required"], (
+            f"{name} 必须允许省略确认令牌以生成预览"
+        )
     assert set(hooks["hooks"]) == OFFICIAL_CODEX_HOOK_EVENTS
     serialized_hooks = json.dumps(hooks, ensure_ascii=False)
     assert "commandWindows" in serialized_hooks, "钩子缺少 Windows 命令"
