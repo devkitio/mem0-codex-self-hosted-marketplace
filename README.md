@@ -16,6 +16,7 @@
 | --- | --- |
 | MCP | 10 个工具，覆盖新增、搜索、分页读取、详情、更新、单条删除、历史、实体枚举和两阶段批量管理 |
 | 生命周期钩子 | `PreToolUse`、`SessionStart`、`UserPromptSubmit`、`PostToolUse`、`Stop`、`PreCompact` 六类事件 |
+| 系统兼容性 | Windows 使用 `python` 与 `commandWindows`，Linux/macOS 使用 `python3`；CI 在三种系统分别验证 |
 | 技能 | 16 个自托管技能，覆盖初始化、健康检查、记住、查看、置顶、遗忘、整理、导入导出、项目切换和统计 |
 | 项目策略 | 原生解析 `mem0.md` 的 `Settings/Search/Ignore/Identity/Categories/Retention` 六个区段 |
 | 自动记忆 | 智能多查询检索、真实 rerank、质量门禁、90 天默认保留、分类保留、压缩后摘要和跨事件去重 |
@@ -48,6 +49,8 @@
 
 - Windows 可执行 `python --version`
 - macOS/Linux 可执行 `python3 --version`
+
+插件运行时只使用 Python 标准库，路径、文件锁、原子状态写入和 UTF-8 数据均兼容 Windows、Linux 与 macOS。项目标识与生产 MCP 保持一致，只允许 1～64 位字母、数字、点、下划线或连字符；仓库根目录名不符合该规则时，运行时会生成稳定的 `project-<哈希>` 标识。
 
 把自托管服务令牌设置为 `MEM0_MCP_TOKEN`。Windows PowerShell 可持久写入当前用户环境：
 
@@ -101,9 +104,9 @@ Codex 不会自动信任第三方钩子；插件更新并改变钩子内容后�
 | `Stop` | 每轮助手输出结束 | 通过质量门禁后提取长期记忆，并按保留策略设置过期时间 |
 | `PreCompact` | 手动或自动压缩前 | 从最近转录保存压缩前总结 |
 
-`SessionStart` 首次启动时还会扫描 `CLAUDE.md`、`AGENTS.md`、`.cursorrules`、`.windsurfrules` 和 `mem0.md`，按标题分块后以 `infer=false` 导入；本地 SHA-256 状态会跳过未变化内容，文件更新或删除后只清理插件此前生成的旧分块。导入前会先持久化待完成状态；文件更新时会保留上一份有效版本，直到新分块写入、验证和旧分块清理全部成功。查询、写入或清理暂时失败时保留可续跑状态，并在下次启动恢复；不同项目并发更新状态时会在同一文件锁内合并，避免互相覆盖。
+`SessionStart` 首次启动时还会扫描 `CLAUDE.md`、`AGENTS.md`、`.cursorrules`、`.windsurfrules` 和 `mem0.md`，按标题分块后以 `infer=false` 导入；每个文件最多读取 100 KB，文件超过限制时不会上传，并会按精确标记安全清理此前由插件导入的旧版本。本地 SHA-256 状态会跳过未变化内容，文件更新或删除后只清理远端搜索结果中项目、来源文件、内容哈希和导入格式均精确匹配的旧分块。本地状态中的未确认 ID 不会直接触发删除。导入前会先持久化待完成状态；文件更新时会保留上一份有效版本，直到新分块序号完整覆盖、写入验证和旧分块逐 ID 清理全部成功。查询、写入或清理暂时失败时保留可续跑状态，并在下次启动恢复；不同项目和项目映射的并发更新都会在文件锁内合并，避免互相覆盖。
 
-自动总结读取最近 12 条用户/助手消息，最多处理 50,000 字符，同时记录分支、触达文件和会话内 Mem0 操作计数。写入使用 `messages` 与 `infer=true`，模型生成的正文始终标记为 `assistant`，避免误记为用户观点；metadata 包含 `type`、`confidence`、`session_id`、分支和项目内相对文件路径。写入前会清除常见系统标签并脱敏普通文本及 JSON 中的令牌、密码和认证头；会话状态使用文件锁合并更新，短消息、寒暄和空内容会被跳过，`Stop` 与 `PreCompact` 的相同正文也不会重复保存。
+自动总结读取最近 12 条用户/助手消息，最多处理 50,000 字符，同时记录分支、触达文件和会话内 Mem0 操作计数。写入使用 `messages` 与 `infer=true`，模型生成的正文始终标记为 `assistant`，避免误记为用户观点；metadata 包含 `type`、`confidence`、`session_id`、分支和项目内相对文件路径。写入前会清除常见系统标签并脱敏普通文本及 JSON 中的令牌、密码和认证头；会话状态使用文件锁合并更新，摘要去重键按 `project_id` 隔离，短消息、寒暄和空内容会被跳过，同一项目中 `Stop` 与 `PreCompact` 的相同正文也不会重复保存。
 
 ## 本地设置与 `mem0.md`
 
@@ -127,7 +130,14 @@ Codex 不会自动信任第三方钩子；插件更新并改变钩子内容后�
 
 ```powershell
 python plugins\mem0\scripts\mem0_self_hosted.py --init-settings
-python plugins\mem0\scripts\mem0_self_hosted.py --show-settings --cwd D:\你的项目
+python plugins\mem0\scripts\mem0_self_hosted.py --show-settings --cwd "D:\你的项目"
+python plugins\mem0\scripts\mem0_self_hosted.py --current-project --cwd "D:\你的项目"
+```
+
+```bash
+python3 plugins/mem0/scripts/mem0_self_hosted.py --init-settings
+python3 plugins/mem0/scripts/mem0_self_hosted.py --show-settings --cwd "/你的项目"
+python3 plugins/mem0/scripts/mem0_self_hosted.py --current-project --cwd "/你的项目"
 ```
 
 项目根目录的 `mem0.md` 可使用六个二级标题。未知标题和字段会被安全忽略，解析失败会回退到默认行为：
@@ -149,7 +159,7 @@ python plugins\mem0\scripts\mem0_self_hosted.py --show-settings --cwd D:\你的�
 - 临时生成文件
 
 ## Identity
-- 本项目是面向 Windows 的桌面应用
+- 本项目是面向 Windows、Linux 和 macOS 的跨平台桌面应用
 
 ## Categories
 - 决定：长期架构选择
@@ -182,7 +192,7 @@ python plugins\mem0\scripts\mem0_self_hosted.py --show-settings --cwd D:\你的�
 | `$mem0:memory-reviewer` / `$mem0:dream` | 审查重复、矛盾和陈旧内容并进行整理 |
 | `$mem0:switch-project` | 将当前工作区持久映射到指定 `project_id` |
 
-`switch-project` 技能会把工作区到 `project_id` 的映射保存在插件数据目录中，因此切换结果可跨任务生效且不会修改仓库；也可以随时恢复为 Git 根目录名自动识别。
+`switch-project` 技能会把工作区到 `project_id` 的映射保存在插件数据目录中，因此切换结果可跨任务生效且不会修改仓库；映射值必须符合生产 MCP 的 1～64 位字符规则，也可以随时恢复为运行时自动识别。
 
 自托管服务现提供 10 个工具：旧 6 个工具保持兼容，并增加 `get_memory_history`、`list_entities`、`delete_all_memories` 和 `delete_entities`。同时支持受限 metadata/filters、分页、过期时间和真实 rerank。项目与运行实体从受管记忆推导，不等同于官方云端实体目录；搜索会分别检索项目与全局范围后按分数合并。
 
@@ -208,14 +218,21 @@ codex plugin marketplace remove mem0-self-hosted
 
 ## 使用其他自托管地址
 
-Fork 本仓库并修改 [`plugins/mem0/.mcp.json`](plugins/mem0/.mcp.json) 中的 `url`。生命周期脚本会读取同一个文件，因此不需要再修改钩子代码。修改后应提升插件版本，避免 Codex 继续使用旧缓存。
+Fork 本仓库并修改 [`plugins/mem0/.mcp.json`](plugins/mem0/.mcp.json) 中的 `url`。生命周期脚本会读取同一个文件，因此不需要再修改钩子代码。远程地址必须使用 HTTPS，只有 `localhost`、`127.0.0.1` 和 `::1` 等回环地址允许 HTTP；认证只会跟随同源重定向。修改后应提升插件版本，避免 Codex 继续使用旧缓存。
 
 ## 本地开发与验证
 
 ```powershell
 python scripts/validate_repo.py
 python -m unittest discover -s tests -v
-codex plugin marketplace add D:\code\mem0-codex-self-hosted-marketplace
+codex plugin marketplace add "D:\code\mem0-codex-self-hosted-marketplace"
+codex plugin add mem0@mem0-self-hosted
+```
+
+```bash
+python3 scripts/validate_repo.py
+python3 -m unittest discover -s tests -v
+codex plugin marketplace add "/path/to/mem0-codex-self-hosted-marketplace"
 codex plugin add mem0@mem0-self-hosted
 ```
 
@@ -225,12 +242,18 @@ codex plugin add mem0@mem0-self-hosted
 python plugins\mem0\scripts\mem0_self_hosted.py --check
 ```
 
+```bash
+python3 plugins/mem0/scripts/mem0_self_hosted.py --check
+```
+
 该命令不仅核对 10 个工具，还会把生产 `tools/list` 的参数、必填项、类型、默认值、枚举和四项 `ToolAnnotations` 与仓库快照比较；发现漂移时返回失败，但不会输出令牌或记忆正文。
+
+GitHub Actions 会在 Ubuntu、Windows 和 macOS 上分别执行仓库校验与完整单元测试。
 
 当前实现还通过以下验收：
 
 - 仓库结构、市场配置、六类钩子和 16 个技能校验。
-- 30 项生命周期脚本单元测试。
+- 完整生命周期脚本单元测试，覆盖三系统路径语义、恢复状态机和安全边界。
 - 生产 `messages + infer=true`、metadata、到期日和 rerank 探针。
 - `update_memory` metadata 合并、置顶取消和单条清理探针。
 - 生产 10 工具契约与 `mcp-schema.snapshot.json` 一致性检查。

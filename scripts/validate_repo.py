@@ -82,7 +82,8 @@ def main() -> None:
     assert marketplace["plugins"][0]["source"]["path"] == "./plugins/mem0"
     assert manifest["name"] == "mem0"
     assert manifest["mcpServers"] == "./.mcp.json"
-    assert manifest["hooks"] == "./hooks/hooks.json"
+    assert "hooks" not in manifest, "默认 hooks/hooks.json 无需在 manifest 重复声明"
+    assert (PLUGIN / "hooks" / "hooks.json").is_file(), "插件缺少默认生命周期钩子文件"
     assert mcp["mcpServers"]["mem0"]["url"] == "https://mem0-api.jiang.in/mcp"
     assert mcp["mcpServers"]["mem0"]["bearer_token_env_var"] == "MEM0_MCP_TOKEN"
     assert set(mcp["mcpServers"]["mem0"]["disabled_tools"]) == BULK_TOOLS
@@ -124,6 +125,21 @@ def main() -> None:
     assert "commandWindows" in serialized_hooks, "钩子缺少 Windows 命令"
     assert "apply_patch" in serialized_hooks, "钩子缺少记忆文件写入保护"
     assert "PostToolUse" in serialized_hooks and "Bash" in serialized_hooks
+    hook_commands = [
+        hook
+        for groups in hooks["hooks"].values()
+        for group in groups
+        for hook in group.get("hooks", [])
+    ]
+    assert hook_commands, "钩子命令不能为空"
+    for hook in hook_commands:
+        assert hook.get("type") == "command", "生命周期钩子必须使用命令类型"
+        assert hook.get("command") == (
+            'python3 "${PLUGIN_ROOT}/scripts/mem0_self_hosted.py"'
+        ), "macOS/Linux 钩子命令无效"
+        assert hook.get("commandWindows") == (
+            'python "${PLUGIN_ROOT}\\scripts\\mem0_self_hosted.py"'
+        ), "Windows 钩子命令无效"
     mem0_matchers = [
         group["matcher"]
         for group in hooks["hooks"]["PreToolUse"]
@@ -151,6 +167,18 @@ def main() -> None:
     skill_dirs = [path for path in (PLUGIN / "skills").iterdir() if path.is_dir()]
     assert {path.name for path in skill_dirs} == OFFICIAL_CODEX_SKILLS, "技能集合必须对齐官方 Codex 插件"
     assert all((path / "SKILL.md").is_file() for path in skill_dirs), "技能缺少 SKILL.md"
+    health_skill = (PLUGIN / "skills" / "health" / "SKILL.md").read_text(encoding="utf-8")
+    assert "../../scripts/mem0_self_hosted.py" in health_skill, "健康检查脚本路径无效"
+    switch_skill = (PLUGIN / "skills" / "switch-project" / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
+    assert "Windows" in switch_skill and "macOS/Linux" in switch_skill
+    assert "python " in switch_skill and "python3 " in switch_skill, (
+        "项目切换技能缺少跨平台 Python 命令"
+    )
+    workflow = (ROOT / ".github" / "workflows" / "validate.yml").read_text(encoding="utf-8")
+    for runner in ("ubuntu-latest", "windows-latest", "macos-latest"):
+        assert runner in workflow, f"CI 缺少 {runner} 验证"
     runtime_contract = (PLUGIN / "SELF_HOSTED_RUNTIME.md").read_text(encoding="utf-8")
     for name in MEM0_TOOLS:
         assert f"`{name}(" in runtime_contract, f"运行时约定缺少工具：{name}"

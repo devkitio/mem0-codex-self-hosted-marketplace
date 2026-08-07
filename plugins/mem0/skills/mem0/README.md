@@ -1,73 +1,25 @@
-# Mem0 Skill for Claude
+# Mem0 SDK 参考技能
 
-Add persistent memory to any AI application in minutes using [Mem0 Platform](https://app.mem0.ai?utm_source=oss&utm_medium=mem0-plugin-skill-readme).
+本目录保留 Mem0 上游 Python、TypeScript、REST 和框架集成资料，供用户明确要求编写应用集成代码时查阅。
 
-## What This Skill Does
+## 与本插件运行时的边界
 
-When installed, Claude can:
+- Codex 插件运行时连接仓库配置的自托管 MCP，只读取 `MEM0_MCP_TOKEN`。
+- 本目录中的上游示例可能使用 Mem0 Platform、官方云端地址或云端凭据变量；这些示例不参与插件安装、认证或生命周期钩子。
+- 不得根据 SDK 示例修改插件的 `.mcp.json`、固定身份、项目隔离或批量删除安全边界。
+- 自托管插件的日常记忆操作应使用同插件中的 `remember`、`peek`、`tour`、`forget`、`health` 等技能。
 
-- **Set up Mem0** in your Python or TypeScript project
-- **Integrate memory** into your existing AI app (LangChain, CrewAI, Vercel AI, OpenAI Agents, LangGraph, LlamaIndex, etc.)
-- **Generate working code** using real API references and tested patterns
-- **Search live docs** on demand for the latest Mem0 documentation
+## 资料索引
 
-## Installation
+- `client/python.md`：Python 客户端
+- `client/node.md`：TypeScript 客户端
+- `client/differences.md`：两端差异
+- `references/quickstart.md`：快速入门
+- `references/sdk-guide.md`：SDK 方法
+- `references/api-reference.md`：REST 接口与过滤器
+- `references/architecture.md`：处理流程、作用域与性能
+- `references/features.md`：检索、图记忆、分类和多模态
+- `references/integration-patterns.md`：常见框架集成
+- `references/use-cases.md`：应用模式
 
-This skill is included automatically when you install the Mem0 plugin:
-
-```
-/plugin marketplace add mem0ai/mem0
-/plugin install mem0@mem0-plugins
-```
-
-See the [plugin README](../../README.md) for full setup instructions.
-
-### Prerequisites
-
-- A Mem0 Platform API key ([Get one here](https://app.mem0.ai/dashboard/api-keys?utm_source=oss&utm_medium=mem0-plugin-skill-readme))
-- Python 3.10+ or Node.js 18+
-- Set the environment variable:
-
-  ```bash
-  export MEM0_API_KEY="m0-your-api-key"
-  ```
-
-## Quick Start
-
-After installing, just ask Claude:
-
-- "Set up mem0 in my project"
-- "Add memory to my chatbot"
-- "Help me search user memories with filters"
-- "Integrate mem0 with my LangChain app"
-- "Add graph memory to track entity relationships"
-
-## What's Inside
-
-```text
-skills/mem0/
-├── SKILL.md                    # Skill definition and instructions
-├── README.md                   # This file
-├── LICENSE                     # Apache-2.0
-├── scripts/
-│   └── mem0_doc_search.py      # Search live Mem0 docs on demand
-└── references/                 # Documentation (loaded on demand)
-    ├── quickstart.md           # Full quickstart (Python, TS, cURL)
-    ├── sdk-guide.md            # All SDK methods (Python + TypeScript)
-    ├── api-reference.md        # REST endpoints, filters, memory object
-    ├── architecture.md         # Processing pipeline, lifecycle, scoping, performance
-    ├── features.md             # Retrieval, graph, categories, MCP, webhooks, multimodal
-    ├── integration-patterns.md # LangChain, CrewAI, Vercel AI, LangGraph, LlamaIndex, etc.
-    └── use-cases.md            # 7 real-world patterns with Python + TypeScript code
-```
-
-## Links
-
-- [Mem0 Platform Dashboard](https://app.mem0.ai?utm_source=oss&utm_medium=mem0-plugin-skill-readme)
-- [Mem0 Documentation](https://docs.mem0.ai)
-- [Mem0 GitHub](https://github.com/mem0ai/mem0)
-- [API Reference](https://docs.mem0.ai/api-reference)
-
-## License
-
-Apache-2.0
+资料来源与许可证见本目录的 `LICENSE` 以及仓库根目录的 `NOTICE.md`。

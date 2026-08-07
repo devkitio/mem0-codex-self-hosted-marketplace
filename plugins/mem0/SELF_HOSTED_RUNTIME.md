@@ -2,7 +2,14 @@
 
 本插件运行时只调用 `https://mem0-api.jiang.in/mcp`，并且只使用 `MEM0_MCP_TOKEN` 认证。不得请求 `api.mem0.ai`、`mcp.mem0.ai`，也不得要求 `MEM0_API_KEY`。
 
-钩子客户端兼容 Streamable HTTP 的 `application/json` 与 `text/event-stream` 响应，并按 JSON-RPC 请求 ID 忽略 SSE 中先到达的通知或其他消息。单次 MCP 响应最多读取 2 MB，服务端错误正文不得透传。钩子兜底日志只记录异常类型或脱敏后的本地诊断，不记录令牌或记忆内容。
+钩子客户端兼容 Streamable HTTP 的 `application/json` 与 `text/event-stream` 响应，并按 JSON-RPC 请求 ID 忽略 SSE 中先到达的通知或其他消息。远程 MCP 必须使用 HTTPS，仅回环地址允许 HTTP；认证只跟随同源重定向。单次 MCP 响应最多读取 2 MB，钩子标准输入最多读取 4 MB，服务端错误正文不得透传。钩子兜底日志只记录异常类型或脱敏后的本地诊断，不记录令牌、用户目录、IP 地址或记忆内容。
+
+## 系统兼容性
+
+- Windows 钩子使用 `commandWindows` 和 `python`；Linux、macOS 钩子使用 `command` 和 `python3`。
+- 插件数据默认写入 `Path.home()/.codex/plugin-data/mem0-self-hosted`，也可由 `PLUGIN_DATA` 指定；状态文件统一使用 UTF-8、独占文件锁和同目录原子替换。
+- 工作区状态键遵循当前系统的路径大小写语义：Windows 归一化大小写，Linux 和 macOS 保留 POSIX 路径大小写；Windows 盘符与 UNC、Linux `/home`、macOS `/Users` 路径均按字符串形态保护和脱敏。
+- 仓库 CI 使用 Python 3.10 在 Ubuntu、Windows 和 macOS 上分别运行结构校验与完整单元测试。
 
 ## 工具签名
 
@@ -22,7 +29,7 @@
 ## 身份与项目边界
 
 - 服务端固定 `user_id=codex-primary` 和 `mcp_owner=codex-primary-adapter`。不得传入或尝试覆盖 `user_id`、`agent_id`、`app_id`、`mcp_owner`、`scope`、`source`。
-- 项目默认范围是当前 Git 根目录名；`switch-project` 技能可在插件数据目录中保存当前工作区的持久映射。
+- 项目标识只允许 1～64 位字母、数字、点、下划线或连字符。默认使用当前 Git 根目录名；目录名不符合规则时生成稳定的 `project-<哈希>` 标识。`switch-project` 技能可在插件数据目录中保存当前工作区的持久映射，非法旧映射会被忽略。
 - 项目搜索和列表可以返回当前项目及全局记忆；精确读取、历史、更新和单条删除必须匹配传入的项目范围。
 - `metadata` 和 `filters` 只用于非保留业务字段，并受服务端的大小、深度、字段和操作符限制。不要在客户端拼入身份过滤条件。
 - `list_entities` 只枚举从受管记忆推导出的 `project` 和 `run`。列出全部项目时不要传 `project_id`；列出运行时传入所属项目。
@@ -41,7 +48,7 @@
 - `debug=false`；只记录决策代码和错误类型，不记录提示、记忆正文或路径
 - `session_retention_days=90`，有效范围 0～3650；0 表示不设置 `expiration_date`，非零值按服务端要求写为 `YYYY-MM-DD`
 
-环境变量使用对应的 `MEM0_AUTO_SAVE`、`MEM0_AUTO_SEARCH`、`MEM0_SEARCH_LIMIT`、`MEM0_CONFIDENCE_THRESHOLD`、`MEM0_RERANK`、`MEM0_DEBUG` 和 `MEM0_SESSION_RETENTION_DAYS`。可通过 `scripts/mem0_self_hosted.py --init-settings` 创建默认本机设置，或用 `--show-settings [--cwd 路径]` 查看合并后的有效值。
+环境变量使用对应的 `MEM0_AUTO_SAVE`、`MEM0_AUTO_SEARCH`、`MEM0_SEARCH_LIMIT`、`MEM0_CONFIDENCE_THRESHOLD`、`MEM0_RERANK`、`MEM0_DEBUG` 和 `MEM0_SESSION_RETENTION_DAYS`。可通过 `scripts/mem0_self_hosted.py --init-settings` 创建默认本机设置，用 `--show-settings [--cwd 路径]` 查看合并后的有效值，或用 `--current-project [--cwd 路径]` 读取运行时最终解析的 `project_id`。
 
 `mem0.md` 原生识别 `## Settings`、`## Search`、`## Ignore`、`## Identity`、`## Categories` 和 `## Retention`。规则只是当前项目的本地策略，不得改变服务端固定用户、所有者和项目隔离：
 
@@ -51,7 +58,7 @@
 - `Categories` 只指导 `infer=true` 的自动总结分类，不伪装成官方云端类别目录。
 - `Retention` 可按 `metadata.type` 设置分类保留期，例如 `session_summary: 90d`、`compact_summary: 90d`、`decision: forever`；旧的 `days`、`retention_days` 和 `retention_session_days` 继续作为会话总结保留期别名。`exclude`/`ignore` 可排除不应自动保存的内容。
 
-复杂提示最多产生四个确定性查询，客户端并发请求后按记忆 ID 去重；单个查询失败允许使用其他查询的结果。纯确认、寒暄、命中 `Ignore` 的提示不会触发检索。自动总结只有在包含决定、目标、完成事项、验证、风险、待办、文件触达等长期价值信号时才写入；使用 `messages=[{"role":"assistant",...}]` 防止把模型观点误归因给用户，并写入 `type/confidence/session_id/branch/files_touched` 等非保留 metadata。`files_touched` 必须是项目内相对路径，普通文本和 JSON 形式的凭据必须先脱敏；会话计数和摘要去重状态必须在文件锁内合并更新，`Stop`、`PreCompact` 与压缩后 `SessionStart` 继续使用摘要哈希和正文哈希去重。
+复杂提示最多产生四个确定性查询，客户端并发请求后按记忆 ID 去重；单个查询失败允许使用其他查询的结果。纯确认、寒暄、命中 `Ignore` 的提示不会触发检索。自动总结只有在包含决定、目标、完成事项、验证、风险、待办、文件触达等长期价值信号时才写入；使用 `messages=[{"role":"assistant",...}]` 防止把模型观点误归因给用户，并写入 `type/confidence/session_id/branch/files_touched` 等非保留 metadata。`files_touched` 必须是项目内相对路径，普通文本和 JSON 形式的凭据必须先脱敏；会话计数和摘要去重状态必须在文件锁内合并更新，摘要哈希与正文哈希去重键必须按 `project_id` 隔离，`Stop`、`PreCompact` 与压缩后 `SessionStart` 只在同一项目内去重。
 
 仓库中的 `mcp-schema.snapshot.json` 固定 10 个工具的参数、必填项、类型、默认值、枚举和四项 `ToolAnnotations`。`scripts/mem0_self_hosted.py --check` 必须实时比较生产 `tools/list`；差异只报告工具或字段名，不输出 schema 正文、令牌或记忆内容。
 
@@ -62,4 +69,4 @@
 - 两个批量工具必须先省略 `confirmation_token` 获取预览，再向用户展示范围、数量和截止时间；取得明确确认后，原样提交 5 分钟 HMAC 令牌执行。
 - 令牌过期、篡改、范围变化或重复使用时不得重试执行，应重新预览并再次确认。禁止用户级或全局清空。
 
-自动导入继续使用 `[mem0:auto-import]` 正文标记；不同来源文件不得仅因内容哈希相同而互相跳过，短 Markdown 章节必须合并到受限分块中。新增分块前必须持久化 `pending` 状态；项目资料更新时，待处理状态必须保留上一份有效版本的哈希、格式和必要的记忆 ID，新分块写入并验证成功前不得删除旧版本。旧分块清理失败时允许新旧版本暂时共存，但不得重复写入新分块；后续启动必须继续清理并在全部成功后提交新状态。项目资料被清空或删除时，只删除本地状态和精确正文标记共同确认由插件生成的旧分块。所有项目范围共用状态文件时，写入必须在共享锁内重新读取并仅合并当前范围，禁止覆盖其他项目状态。
+自动导入继续使用 `[mem0:auto-import]` 正文标记，每个候选文件最多读取 100 KB；超限文件不上传，并按与删除文件相同的精确标记流程清理旧导入。检索结果必须同时精确匹配项目、来源文件、内容哈希和导入格式，不同来源文件或项目不得仅因内容哈希相同而互相跳过。短 Markdown 章节必须合并到受限分块中，验证时要求 `分块：i/n` 完整覆盖，重复序号不能代替缺失分块。新增分块前必须持久化 `pending` 状态；项目资料更新时，待处理状态必须保留上一份有效版本的哈希、格式和必要的记忆 ID，新分块写入并验证成功前不得删除旧版本。旧分块清理进度必须逐 ID 持久化；本地状态 ID 只用于恢复进度，只有精确搜索返回且正文标记完整匹配的 ID 才允许调用删除。搜索未返回或标记已变化的状态 ID 不调用删除，并从本地清理队列安全收敛。旧分块清理失败时允许新旧版本暂时共存，但不得重复写入新分块；后续启动必须继续清理并在全部成功后提交新状态。项目资料被清空、删除或变得过大时，只删除精确正文标记确认由插件生成的旧分块。所有项目范围共用状态文件时，写入必须在共享锁内重新读取并仅合并当前范围，禁止覆盖其他项目状态；文件与远端分块均未变化时不得重写状态文件。

@@ -1,23 +1,11 @@
 #!/usr/bin/env python3
-"""
-Mem0 Documentation Search Agent (Mintlify-based)
-On-demand search tool for querying Mem0 documentation without storing content locally.
+"""按需检索 docs.mem0.ai，不在本地保存文档正文。
 
-This tool leverages Mintlify's documentation structure to perform just-in-time
-retrieval of technical information from docs.mem0.ai.
+macOS/Linux 使用 `python3`，Windows 将其替换为 `python`：
 
-Usage:
-    python mem0_doc_search.py --query "how to add graph memory"
-    python mem0_doc_search.py --query "filter syntax for categories"
-    python mem0_doc_search.py --page "/platform/features/graph-memory"
-    python mem0_doc_search.py --index
-    python mem0_doc_search.py --query "webhook events" --section platform
-
-Purpose:
-    - Avoid bloating local context with full documentation
-    - Enable just-in-time retrieval of technical details
-    - Query specific documentation pages on demand
-    - Search across the full Mem0 documentation site
+    python3 mem0_doc_search.py --query "图记忆配置"
+    python3 mem0_doc_search.py --page "/platform/features/graph-memory"
+    python3 mem0_doc_search.py --index
 """
 
 import argparse
@@ -32,7 +20,7 @@ SEARCH_ENDPOINT = f"{DOCS_BASE}/api/search"
 LLMS_INDEX = f"{DOCS_BASE}/llms.txt"
 MAX_RESPONSE_BYTES = 2_000_000
 
-# Known documentation sections for targeted retrieval
+# 用于定向检索的已知文档区段
 SECTION_MAP = {
     "platform": [
         "/platform/overview",
@@ -73,27 +61,70 @@ SECTION_MAP = {
 }
 
 
+def is_allowed_docs_url(url: str) -> bool:
+    try:
+        parsed = urllib.parse.urlsplit(url)
+        return (
+            parsed.scheme == "https"
+            and parsed.hostname == "docs.mem0.ai"
+            and parsed.port in {None, 443}
+            and parsed.username is None
+            and parsed.password is None
+            and not parsed.fragment
+        )
+    except ValueError:
+        return False
+
+
+class DocsRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, request, file_pointer, code, message, headers, new_url):
+        if not is_allowed_docs_url(new_url):
+            raise urllib.error.HTTPError(
+                request.full_url,
+                code,
+                "拒绝重定向到非官方文档地址",
+                headers,
+                file_pointer,
+            )
+        return super().redirect_request(
+            request,
+            file_pointer,
+            code,
+            message,
+            headers,
+            new_url,
+        )
+
+
+def open_docs_request(request):
+    opener = urllib.request.build_opener(DocsRedirectHandler())
+    return opener.open(request, timeout=15)
+
+
 def fetch_url(url: str) -> str:
-    """Fetch content from a URL."""
+    """读取允许范围内的文档 URL。"""
+    if not is_allowed_docs_url(url):
+        return "只允许读取 https://docs.mem0.ai 下的文档页面"
     req = urllib.request.Request(url, headers={"User-Agent": "Mem0DocSearchAgent/1.0"})
     try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with open_docs_request(req) as resp:
             raw = resp.read(MAX_RESPONSE_BYTES + 1)
             if len(raw) > MAX_RESPONSE_BYTES:
                 return "响应内容超过大小限制"
             return raw.decode("utf-8")
-    except urllib.error.HTTPError as e:
-        return f"HTTP Error {e.code}: {e.reason}"
-    except urllib.error.URLError as e:
-        return f"URL Error: {e.reason}"
+    except urllib.error.HTTPError as error:
+        return f"HTTP 错误 {error.code}"
+    except urllib.error.URLError:
+        return "URL 请求失败"
+    except OSError:
+        return "文档请求失败"
+    except UnicodeDecodeError:
+        return "文档响应不是有效的 UTF-8 文本"
 
 
 def search_docs(query: str, section: str | None = None) -> dict:
-    """
-    Search Mem0 documentation using Mintlify's search API.
-    Falls back to the llms.txt index for keyword matching if the API is unavailable.
-    """
-    # Try Mintlify search API first
+    """优先使用 Mintlify 搜索，失败时回退到 llms.txt 关键词匹配。"""
+    # 优先使用 Mintlify 搜索接口
     params = urllib.parse.urlencode({"query": query})
     search_url = f"{SEARCH_ENDPOINT}?{params}"
 
@@ -109,7 +140,7 @@ def search_docs(query: str, section: str | None = None) -> dict:
     except Exception:
         pass
 
-    # Fallback: search llms.txt index for matching URLs
+    # 回退到 llms.txt 索引
     index_content = fetch_url(LLMS_INDEX)
     query_lower = query.lower()
     matching_urls = []
@@ -129,41 +160,30 @@ def search_docs(query: str, section: str | None = None) -> dict:
         "source": "llms_txt_index",
         "query": query,
         "matching_urls": matching_urls[:20],
-        "suggestion": "Fetch specific URLs for detailed content",
+        "suggestion": "可读取具体 URL 查看完整内容",
     }
 
 
 def fetch_page(page_path: str) -> dict:
-    """Fetch a specific documentation page."""
+    """读取指定文档页面。"""
     url = f"{DOCS_BASE}{page_path}" if page_path.startswith("/") else page_path
-    parsed = urllib.parse.urlsplit(url)
-    try:
-        allowed = (
-            parsed.scheme == "https"
-            and parsed.hostname == "docs.mem0.ai"
-            and parsed.port in {None, 443}
-            and not parsed.username
-            and not parsed.password
-        )
-    except ValueError:
-        allowed = False
-    if not allowed:
+    if not is_allowed_docs_url(url):
         return {"error": "只允许读取 https://docs.mem0.ai 下的文档页面"}
     content = fetch_url(url)
     return {"url": url, "content": content[:10000], "truncated": len(content) > 10000}
 
 
 def get_index() -> dict:
-    """Fetch the full documentation index from llms.txt."""
+    """读取 llms.txt 中的完整文档索引。"""
     content = fetch_url(LLMS_INDEX)
     urls = [line.strip() for line in content.splitlines() if line.strip() and not line.startswith("#")]
     return {"total_pages": len(urls), "urls": urls, "sections": list(SECTION_MAP.keys())}
 
 
 def list_section(section: str) -> dict:
-    """List all known pages in a documentation section."""
+    """列出指定文档区段中的已知页面。"""
     if section not in SECTION_MAP:
-        return {"error": f"Unknown section: {section}", "available": list(SECTION_MAP.keys())}
+        return {"error": f"未知文档区段：{section}", "available": list(SECTION_MAP.keys())}
     return {
         "section": section,
         "pages": [f"{DOCS_BASE}{p}" for p in SECTION_MAP[section]],
@@ -171,12 +191,12 @@ def list_section(section: str) -> dict:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Search Mem0 documentation on demand")
-    parser.add_argument("--query", help="Search query for documentation")
-    parser.add_argument("--page", help="Fetch a specific page path (e.g., /platform/features/graph-memory)")
-    parser.add_argument("--index", action="store_true", help="Show full documentation index")
-    parser.add_argument("--section", help="Filter by section or list section pages")
-    parser.add_argument("--json", action="store_true", help="Output as JSON")
+    parser = argparse.ArgumentParser(description="按需检索 Mem0 官方文档")
+    parser.add_argument("--query", help="文档搜索词")
+    parser.add_argument("--page", help="具体页面路径，例如 /platform/features/graph-memory")
+    parser.add_argument("--index", action="store_true", help="显示完整文档索引")
+    parser.add_argument("--section", help="按区段过滤或列出区段页面")
+    parser.add_argument("--json", action="store_true", help="输出 JSON")
 
     args = parser.parse_args()
 
@@ -197,38 +217,38 @@ def main():
     else:
         if isinstance(result, dict):
             if "results" in result:
-                print(f"Source: {result.get('source', 'unknown')}")
+                print(f"来源：{result.get('source', '未知')}")
                 for r in result["results"]:
-                    print(f"  - {r.get('title', 'N/A')}: {r.get('url', 'N/A')}")
+                    print(f"  - {r.get('title', '无标题')}: {r.get('url', '无地址')}")
                     if r.get("description"):
                         print(f"    {r['description'][:200]}")
             elif "matching_urls" in result:
-                print(f"Source: {result['source']}")
-                print(f"Query: {result['query']}")
+                print(f"来源：{result['source']}")
+                print(f"查询：{result['query']}")
                 for url in result["matching_urls"]:
                     print(f"  - {url}")
                 if result.get("suggestion"):
                     print(f"\n{result['suggestion']}")
             elif "urls" in result:
-                print(f"Total documentation pages: {result['total_pages']}")
-                print(f"Sections: {', '.join(result['sections'])}")
+                print(f"文档页面总数：{result['total_pages']}")
+                print(f"区段：{', '.join(result['sections'])}")
                 for url in result["urls"][:30]:
                     print(f"  - {url}")
                 if result["total_pages"] > 30:
-                    print(f"  ... and {result['total_pages'] - 30} more")
+                    print(f"  ... 另有 {result['total_pages'] - 30} 个页面")
             elif "pages" in result:
-                print(f"Section: {result['section']}")
+                print(f"区段：{result['section']}")
                 for page in result["pages"]:
                     print(f"  - {page}")
             elif "content" in result:
-                print(f"URL: {result['url']}")
+                print(f"URL：{result['url']}")
                 if result.get("truncated"):
-                    print("[Content truncated to 10000 chars]")
+                    print("[内容已截断为 10000 个字符]")
                 print(result["content"])
             elif "error" in result:
-                print(f"Error: {result['error']}")
+                print(f"错误：{result['error']}")
                 if result.get("available"):
-                    print(f"Available sections: {', '.join(result['available'])}")
+                    print(f"可用区段：{', '.join(result['available'])}")
             else:
                 print(json.dumps(result, indent=2))
 

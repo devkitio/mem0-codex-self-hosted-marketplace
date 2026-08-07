@@ -1,6 +1,6 @@
 {
   "name": "mem0",
-  "version": "0.2.13-selfhosted.7+codex.20260806162029",
+  "version": "0.2.13-selfhosted.8+codex.20260806121100",
   "description": "\u9762\u5411 Codex \u7684 Mem0 \u81ea\u6258\u7ba1\u957f\u671f\u8bb0\u5fc6\u63d2\u4ef6\u3002",
   "author": {
     "name": "Mem0 \u81ea\u6258\u7ba1\u9002\u914d"
@@ -16,7 +16,6 @@
   ],
   "skills": "./skills/",
   "mcpServers": "./.mcp.json",
-  "hooks": "./hooks/hooks.json",
   "interface": {
     "displayName": "Mem0 \u81ea\u6258\u7ba1\u7248",
     "shortDescription": "\u901a\u8fc7\u79c1\u6709 Mem0 \u670d\u52a1\u4fdd\u5b58\u548c\u68c0\u7d22\u957f\u671f\u8bb0\u5fc6",

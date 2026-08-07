@@ -4,16 +4,21 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import math
 import os
 import re
 import subprocess
 import sys
+import tempfile
+import threading
 import time
+import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable
 
@@ -27,12 +32,13 @@ LOG_PATH = PLUGIN_DATA / "mem0_self_hosted.log"
 PROTOCOL_VERSION = "2025-03-26"
 MCP_REQUEST_TIMEOUT = 6
 MAX_MCP_RESPONSE_BYTES = 2_000_000
+MAX_HOOK_INPUT_BYTES = 4_000_000
 MAX_MEMORY_TEXT = 50_000
 MAX_TRANSCRIPT_BYTES = 6_000_000
 MAX_IMPORT_FILE_SIZE = 100_000
 MAX_IMPORT_CHUNK_SIZE = 10_000
 MIN_IMPORT_CHUNK_SIZE = 50
-IMPORT_FORMAT_VERSION = 2
+IMPORT_FORMAT_VERSION = 3
 SCHEMA_SNAPSHOT_PATH = PLUGIN_ROOT / "mcp-schema.snapshot.json"
 TARGET_PROJECT_FILES = ("CLAUDE.md", "AGENTS.md", ".cursorrules", ".windsurfrules", "mem0.md")
 DEFAULT_SETTINGS: dict[str, Any] = {
@@ -54,6 +60,7 @@ SETTING_ENV_VARS = {
     "session_retention_days": "MEM0_SESSION_RETENTION_DAYS",
 }
 MEM0_MD_SECTIONS = {"settings", "search", "ignore", "identity", "categories", "retention"}
+PROJECT_ID_PATTERN = re.compile(r"[A-Za-z0-9._-]{1,64}")
 MEM0_TOOL_NAMES = {
     "add_memory",
     "delete_all_memories",
@@ -76,13 +83,34 @@ SYSTEM_TAG_PATTERN = re.compile(
 )
 AUTH_SECRET_PATTERN = re.compile(
     r'''(?ix)(?P<prefix>["']?authorization["']?\s*[:=]\s*)'''
-    r'''(?P<value>"[^"\r\n]*"|'[^'\r\n]*'|(?:bearer|token)\s+[^\s,;]+)'''
+    r'''(?P<value>"[^"\r\n]*"|'[^'\r\n]*'|[^\r\n]+)'''
+)
+AUTH_SCHEME_PATTERN = re.compile(
+    r"(?i)\b(?:Bearer|Basic|Token)\s+[A-Za-z0-9._~+/=-]+"
 )
 NAMED_SECRET_PATTERN = re.compile(
-    r'''(?ix)(?P<prefix>["']?(?:api[_-]?key|token|password|passwd|secret)["']?\s*[:=]\s*)'''
+    r'''(?ix)(?P<prefix>["']?[A-Za-z0-9_.-]*'''
+    r'''(?:api[_-]?key|access[_-]?key|token|password|passwd|secret)'''
+    r'''[A-Za-z0-9_.-]*["']?\s*[:=]\s*)'''
     r'''(?P<value>"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;]+)'''
 )
-URL_CREDENTIAL_PATTERN = re.compile(r"(?i)(https?://[^\s/@:]+:)[^\s/@]+@")
+URI_CREDENTIAL_PATTERN = re.compile(
+    r"(?i)(?P<scheme>[a-z][a-z0-9+.-]*://)[^\s/@]+(?::[^\s/@]*)?@"
+)
+WINDOWS_USER_PATH_PATTERN = re.compile(
+    r'''(?i)(?<![A-Za-z0-9])(?:[A-Z]:)?[\\/](?:Users|Documents and Settings)'''
+    r'''[\\/][^\\/\r\n"']+'''
+)
+UNIX_USER_PATH_PATTERN = re.compile(r'''(?<![A-Za-z0-9])/(?:home|Users)/[^/\r\n"']+''')
+IPV4_PATTERN = re.compile(r"(?<![\d.])(?:\d{1,3}\.){3}\d{1,3}(?![\d.])")
+BRACKETED_IPV6_PATTERN = re.compile(r"\[[0-9A-Fa-f:.%]+\]")
+BARE_IPV6_PATTERN = re.compile(
+    r"(?<![0-9A-Za-z])(?:[0-9A-Fa-f]{0,4}:){2,7}[0-9A-Fa-f]{0,4}"
+    r"(?:%[0-9A-Za-z_.-]+)?(?![0-9A-Za-z])"
+)
+PATCH_FILE_PATTERN = re.compile(
+    r"(?m)^\s*(?:\*{3}\s+(?:Add|Update|Delete)\s+File:|---|\+\+\+)\s*(.+?)\s*$"
+)
 PRIVATE_KEY_PATTERN = re.compile(
     r"-----BEGIN [^-\r\n]*PRIVATE KEY-----.*?-----END [^-\r\n]*PRIVATE KEY-----",
     re.DOTALL,
@@ -115,6 +143,7 @@ SUMMARY_SIGNAL_PATTERN = re.compile(
     r"错误|失败|根因|风险|文件|分支|commit|目标版本|must|should|decided|implemented|fixed|verified|todo|blocked)",
     re.IGNORECASE,
 )
+ATOMIC_WRITE_LOCK = threading.Lock()
 
 
 def log_error(message: str) -> None:
@@ -130,19 +159,30 @@ def log_error(message: str) -> None:
 
 def atomic_write_json(path: Path, value: Any) -> None:
     """原子写入插件状态，避免钩子并发导致半截 JSON。"""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    try:
-        with temporary.open("w", encoding="utf-8") as handle:
-            json.dump(value, handle, ensure_ascii=False, indent=2)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-    finally:
+    with ATOMIC_WRITE_LOCK:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary: Path | None = None
         try:
-            temporary.unlink()
-        except OSError:
-            pass
+            with tempfile.NamedTemporaryFile(
+                "w",
+                encoding="utf-8",
+                dir=path.parent,
+                prefix=f".{path.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as handle:
+                temporary = Path(handle.name)
+                json.dump(value, handle, ensure_ascii=False, indent=2)
+                handle.flush()
+                os.fsync(handle.fileno())
+            assert temporary is not None
+            os.replace(temporary, path)
+        finally:
+            if temporary is not None:
+                try:
+                    temporary.unlink()
+                except OSError:
+                    pass
 
 
 def load_json_file(path: Path, default: Any) -> Any:
@@ -150,6 +190,81 @@ def load_json_file(path: Path, default: Any) -> Any:
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return default
+
+
+def load_hook_input(stream: Any) -> Any:
+    binary = getattr(stream, "buffer", None)
+    if binary is not None:
+        raw = binary.read(MAX_HOOK_INPUT_BYTES + 1)
+        if len(raw) > MAX_HOOK_INPUT_BYTES:
+            raise ValueError("钩子输入超过大小限制")
+        return json.loads(raw.decode("utf-8"))
+    text = stream.read(MAX_HOOK_INPUT_BYTES + 1)
+    if len(text.encode("utf-8")) > MAX_HOOK_INPUT_BYTES:
+        raise ValueError("钩子输入超过大小限制")
+    return json.loads(text)
+
+
+def http_origin(url: str) -> tuple[str, str, int]:
+    try:
+        parsed = urllib.parse.urlsplit(url)
+        port = parsed.port
+    except ValueError as exc:
+        raise RuntimeError("MCP 地址格式无效") from exc
+    scheme = parsed.scheme.casefold()
+    host = (parsed.hostname or "").casefold()
+    if scheme not in {"http", "https"} or not host:
+        raise RuntimeError("MCP 地址必须是有效的 HTTP(S) URL")
+    return scheme, host, port or (443 if scheme == "https" else 80)
+
+
+def validate_mcp_url(url: str) -> None:
+    scheme, host, _ = http_origin(url)
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.username is not None or parsed.password is not None or parsed.fragment:
+        raise RuntimeError("MCP 地址不得包含凭据或片段")
+    if scheme == "https":
+        return
+    try:
+        loopback = ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        loopback = host == "localhost"
+    if not loopback:
+        raise RuntimeError("MCP 地址必须使用 HTTPS；仅回环地址允许 HTTP")
+
+
+class SameOriginRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(
+        self,
+        request: urllib.request.Request,
+        file_pointer: Any,
+        code: int,
+        message: str,
+        headers: Any,
+        new_url: str,
+    ) -> urllib.request.Request | None:
+        validate_mcp_url(new_url)
+        if http_origin(request.full_url) != http_origin(new_url):
+            raise RuntimeError("MCP 拒绝跨源重定向")
+        redirected = super().redirect_request(
+            request,
+            file_pointer,
+            code,
+            message,
+            headers,
+            new_url,
+        )
+        if redirected is not None:
+            authorization = request.get_header("Authorization")
+            redirected.remove_header("Authorization")
+            if authorization:
+                redirected.add_unredirected_header("Authorization", authorization)
+        return redirected
+
+
+def open_mcp_request(request: urllib.request.Request) -> Any:
+    opener = urllib.request.build_opener(SameOriginRedirectHandler())
+    return opener.open(request, timeout=MCP_REQUEST_TIMEOUT)
 
 
 def load_connection() -> tuple[str, str]:
@@ -162,6 +277,7 @@ def load_connection() -> tuple[str, str]:
     token = os.environ.get(token_name, "").strip()
     if not url:
         raise RuntimeError("插件未配置 mcpServers.mem0.url")
+    validate_mcp_url(url)
     if not token:
         raise RuntimeError(f"未设置令牌环境变量 {token_name}")
     return url, token
@@ -204,14 +320,14 @@ def mcp_request(method: str, params: dict[str, Any]) -> dict[str, Any]:
         data=payload,
         method="POST",
         headers={
-            "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",
             "Accept": "application/json, text/event-stream",
             "MCP-Protocol-Version": PROTOCOL_VERSION,
             "User-Agent": "codex-mem0-self-hosted-hook/2.0",
         },
     )
-    with urllib.request.urlopen(request, timeout=MCP_REQUEST_TIMEOUT) as response:
+    request.add_unredirected_header("Authorization", f"Bearer {token}")
+    with open_mcp_request(request) as response:
         raw = response.read(MAX_MCP_RESPONSE_BYTES + 1)
         if len(raw) > MAX_MCP_RESPONSE_BYTES:
             raise RuntimeError("MCP 响应超过大小限制")
@@ -231,8 +347,8 @@ def call_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-def git_root(cwd: str | None) -> Path:
-    working_dir = Path(cwd or os.getcwd()).resolve()
+@lru_cache(maxsize=16)
+def _cached_git_root(working_dir: str) -> Path:
     try:
         completed = subprocess.run(
             ["git", "-C", str(working_dir), "rev-parse", "--show-toplevel"],
@@ -243,16 +359,39 @@ def git_root(cwd: str | None) -> Path:
         )
         return Path(completed.stdout.strip()).resolve()
     except (OSError, subprocess.SubprocessError):
-        return working_dir
+        return Path(working_dir)
+
+
+def git_root(cwd: str | None) -> Path:
+    working_dir = Path(cwd or os.getcwd()).resolve()
+    return _cached_git_root(str(working_dir))
 
 
 def project_mapping_path() -> Path:
     return PLUGIN_DATA / "project_mappings.json"
 
 
+def _project_mapping_key(root: Path) -> str:
+    return hashlib.sha256(os.fsencode(os.path.normcase(str(root)))).hexdigest()
+
+
 def project_mapping_key(cwd: str | None) -> str:
-    root = git_root(cwd)
-    return hashlib.sha256(str(root).casefold().encode("utf-8")).hexdigest()
+    return _project_mapping_key(git_root(cwd))
+
+
+def validate_project_id(project_id: str) -> str:
+    value = project_id.strip()
+    if not PROJECT_ID_PATTERN.fullmatch(value):
+        raise ValueError("project_id 必须由 1～64 位字母、数字、点、下划线或连字符组成")
+    return value
+
+
+def default_project_id(root: Path) -> str:
+    name = root.name or "default"
+    if PROJECT_ID_PATTERN.fullmatch(name):
+        return name
+    digest = hashlib.sha256(name.encode("utf-8")).hexdigest()[:16]
+    return f"project-{digest}"
 
 
 def resolve_project_id(cwd: str | None) -> str:
@@ -260,29 +399,39 @@ def resolve_project_id(cwd: str | None) -> str:
     root = git_root(cwd)
     mappings = load_json_file(project_mapping_path(), {})
     if isinstance(mappings, dict):
-        project_id = mappings.get(project_mapping_key(str(root)))
+        project_id = mappings.get(_project_mapping_key(root))
         if isinstance(project_id, str) and project_id.strip():
-            return project_id.strip()
-    return root.name or "default"
+            try:
+                return validate_project_id(project_id)
+            except ValueError:
+                log_error("忽略不符合生产契约的项目映射")
+    return default_project_id(root)
 
 
 def set_project_mapping(cwd: str | None, project_id: str | None) -> str:
     root = git_root(cwd)
-    mappings = load_json_file(project_mapping_path(), {})
-    if not isinstance(mappings, dict):
-        mappings = {}
-    key = project_mapping_key(str(root))
-    if project_id is None:
-        mappings.pop(key, None)
-        resolved = root.name or "default"
-    else:
-        value = project_id.strip()
-        if not value or len(value) > 128 or any(ord(character) < 32 for character in value):
-            raise ValueError("project_id 必须是 1～128 个不含控制字符的字符")
-        mappings[key] = value
-        resolved = value
-    atomic_write_json(project_mapping_path(), mappings)
-    return resolved
+    path = project_mapping_path()
+    lock_path = path.with_suffix(".lock")
+    if not wait_for_lock(lock_path, timeout=5):
+        raise TimeoutError("等待项目映射锁超时")
+    try:
+        mappings = load_json_file(path, {})
+        if not isinstance(mappings, dict):
+            mappings = {}
+        key = _project_mapping_key(root)
+        if project_id is None:
+            changed = key in mappings
+            mappings.pop(key, None)
+            resolved = default_project_id(root)
+        else:
+            resolved = validate_project_id(project_id)
+            changed = mappings.get(key) != resolved
+            mappings[key] = resolved
+        if changed:
+            atomic_write_json(path, mappings)
+        return resolved
+    finally:
+        release_lock(lock_path)
 
 
 def resolve_branch(cwd: str | None) -> str:
@@ -361,7 +510,8 @@ def parse_mem0_md(cwd: str | None) -> dict[str, Any]:
     if path is None:
         return empty
     try:
-        raw = path.read_bytes()
+        with path.open("rb") as handle:
+            raw = handle.read(MAX_IMPORT_FILE_SIZE + 1)
     except OSError:
         return empty
     if len(raw) > MAX_IMPORT_FILE_SIZE:
@@ -504,7 +654,9 @@ def structured_results(result: dict[str, Any]) -> list[dict[str, Any]]:
 def format_context(result: dict[str, Any], limit: int = 5) -> str:
     memories: list[str] = []
     for item in structured_results(result)[:limit]:
-        text = str(item.get("memory", "")).strip()
+        text = redact_sensitive(
+            SYSTEM_TAG_PATTERN.sub("", str(item.get("memory", "")))
+        ).strip()
         if not text:
             continue
         memory_id = str(item.get("id", ""))[:8]
@@ -708,10 +860,27 @@ def redact_sensitive(text: str) -> str:
         quote = value[0] if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'" else ""
         return f"{match.group('prefix')}{quote}[已脱敏]{quote}"
 
+    def replace_ip(match: re.Match[str]) -> str:
+        candidate = match.group(0).strip("[]").split("%", 1)[0]
+        try:
+            ipaddress.ip_address(candidate)
+        except ValueError:
+            return match.group(0)
+        return "[IP已脱敏]"
+
     value = PRIVATE_KEY_PATTERN.sub("[私钥已脱敏]", text)
     value = AUTH_SECRET_PATTERN.sub(replace_assignment, value)
+    value = AUTH_SCHEME_PATTERN.sub("[认证信息已脱敏]", value)
     value = NAMED_SECRET_PATTERN.sub(replace_assignment, value)
-    value = URL_CREDENTIAL_PATTERN.sub(r"\1[已脱敏]@", value)
+    value = URI_CREDENTIAL_PATTERN.sub(r"\g<scheme>[凭据已脱敏]@", value)
+    for home in {str(Path.home()), str(Path.home()).replace("\\", "/")}:
+        if home:
+            value = re.sub(re.escape(home), "[用户目录]", value, flags=re.IGNORECASE)
+    value = WINDOWS_USER_PATH_PATTERN.sub("[用户目录]", value)
+    value = UNIX_USER_PATH_PATTERN.sub("[用户目录]", value)
+    value = IPV4_PATTERN.sub(replace_ip, value)
+    value = BRACKETED_IPV6_PATTERN.sub(replace_ip, value)
+    value = BARE_IPV6_PATTERN.sub(replace_ip, value)
     return value
 
 
@@ -747,10 +916,15 @@ def collect_file_paths(value: Any, found: set[str]) -> None:
     if isinstance(value, dict):
         for key, child in value.items():
             if key in {"file_path", "path"} and isinstance(child, str):
-                if FILE_PATTERN.fullmatch(child.strip()):
-                    found.add(child.strip())
+                candidate = child.strip()
+                if candidate:
+                    found.add(candidate[:4096])
             elif key in {"command", "patch"} and isinstance(child, str):
                 found.update(FILE_PATTERN.findall(child))
+                for match in PATCH_FILE_PATTERN.finditer(child):
+                    candidate = match.group(1).strip().strip("\"'")
+                    if candidate and candidate != "/dev/null":
+                        found.add(candidate[:4096])
             else:
                 collect_file_paths(child, found)
     elif isinstance(value, list):
@@ -827,7 +1001,10 @@ def safe_project_files(files: list[str], cwd: str | None) -> list[str]:
         except (OSError, ValueError):
             continue
         parts = [part.casefold() for part in relative_path.parts]
-        if any(part in {".git", ".env", "node_modules", "target", "vendor"} for part in parts):
+        if any(
+            part in {".git", "node_modules", "target", "vendor"} or part.startswith(".env")
+            for part in parts
+        ):
             continue
         relative = str(relative_path).replace("\\", "/")
         if relative and relative not in safe:
@@ -1021,9 +1198,12 @@ def save_summary(
     content_digest = hashlib.sha256(
         (clean + "\0" + "\0".join(files)).encode("utf-8")
     ).hexdigest()
-    if summary_was_saved(session_id, kind, digest) or summary_was_saved(
+    project_scope = hashlib.sha256(project_id.encode("utf-8")).hexdigest()[:16]
+    kind_key = f"{project_scope}:{kind}"
+    content_key = f"{project_scope}:content"
+    if summary_was_saved(session_id, kind_key, digest) or summary_was_saved(
         session_id,
-        "content",
+        content_key,
         content_digest,
     ):
         return
@@ -1057,16 +1237,16 @@ def save_summary(
         return
     try:
         if session_id and (
-            summary_was_saved(session_id, kind, digest)
-            or summary_was_saved(session_id, "content", content_digest)
+            summary_was_saved(session_id, kind_key, digest)
+            or summary_was_saved(session_id, content_key, content_digest)
         ):
             return
         call_tool("add_memory", arguments)
         mark_summaries_saved(
             session_id,
             {
-                kind: digest,
-                "content": content_digest,
+                kind_key: digest,
+                content_key: content_digest,
             },
         )
     finally:
@@ -1106,19 +1286,68 @@ def import_state_path() -> Path:
 
 
 def import_scope_key(root: Path, project_id: str) -> str:
-    value = f"{str(root).casefold()}\0{project_id}"
-    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+    value = (
+        os.fsencode(os.path.normcase(str(root)))
+        + b"\0"
+        + project_id.encode("utf-8")
+    )
+    return hashlib.sha256(value).hexdigest()
 
 
-def delete_memories(memory_ids: list[str], project_id: str) -> bool:
+def delete_memories(
+    memory_ids: list[str],
+    project_id: str,
+    progress: Callable[[list[str]], None] | None = None,
+) -> bool:
+    remaining = list(dict.fromkeys(memory_ids))
     succeeded = True
-    for memory_id in dict.fromkeys(memory_ids):
+    for memory_id in list(remaining):
         try:
             call_tool("delete_memory", {"memory_id": memory_id, "project_id": project_id})
         except Exception as exc:
             succeeded = False
             log_error(f"清理旧导入记忆失败 {type(exc).__name__}")
+            continue
+        remaining.remove(memory_id)
+        if progress is not None:
+            progress(list(remaining))
     return succeeded
+
+
+def find_import_memories(
+    filename: str,
+    file_hash: str,
+    project_id: str,
+    format_version: int | None = IMPORT_FORMAT_VERSION,
+) -> list[tuple[str, str]]:
+    """只返回正文带有精确插件标记的导入记忆。"""
+    result = call_tool(
+        "search_memories",
+        {
+            "query": (
+                f"[mem0:auto-import] 项目 {project_id} 来源文件 {filename} 内容哈希 {file_hash}"
+                + (f" 导入格式 {format_version}" if format_version is not None else "")
+            ),
+            "project_id": project_id,
+            "top_k": 50,
+            "threshold": 0.0,
+        },
+    )
+    memories: list[tuple[str, str]] = []
+    for item in structured_results(result):
+        text = str(item.get("memory", ""))
+        lines = set(text.splitlines())
+        memory_id = item.get("id")
+        if (
+            isinstance(memory_id, str)
+            and "[mem0:auto-import]" in lines
+            and f"项目：{project_id}" in lines
+            and f"来源文件：{filename}" in lines
+            and f"内容哈希：{file_hash}" in lines
+            and (format_version is None or f"导入格式：{format_version}" in lines)
+        ):
+            memories.append((memory_id, text))
+    return list(dict.fromkeys(memories))
 
 
 def find_import_memory_ids(
@@ -1127,32 +1356,46 @@ def find_import_memory_ids(
     project_id: str,
     format_version: int | None = IMPORT_FORMAT_VERSION,
 ) -> list[str]:
-    """只返回正文带有精确插件标记的导入记忆，避免误删用户内容。"""
-    result = call_tool(
-        "search_memories",
-        {
-            "query": (
-                f"[mem0:auto-import] 来源文件 {filename} 内容哈希 {file_hash}"
-                + (f" 导入格式 {format_version}" if format_version is not None else "")
-            ),
-            "project_id": project_id,
-            "top_k": 50,
-            "threshold": 0.0,
-        },
-    )
-    ids: list[str] = []
-    for item in structured_results(result):
-        text = str(item.get("memory", ""))
-        memory_id = item.get("id")
-        if (
-            isinstance(memory_id, str)
-            and "[mem0:auto-import]" in text
-            and f"来源文件：{filename}" in text
-            and f"内容哈希：{file_hash}" in text
-            and (format_version is None or f"导入格式：{format_version}" in text)
-        ):
-            ids.append(memory_id)
-    return list(dict.fromkeys(ids))
+    return [
+        memory_id
+        for memory_id, _ in find_import_memories(
+            filename,
+            file_hash,
+            project_id,
+            format_version,
+        )
+    ]
+
+
+def complete_import_chunk_ids(
+    memories: list[tuple[str, str]],
+    expected_chunks: int,
+) -> list[str]:
+    """按分块序号验证完整覆盖，重复序号不能冒充缺失分块。"""
+    by_index: dict[int, str] = {}
+    for memory_id, text in memories:
+        marker = re.search(r"(?m)^分块：(\d+)/(\d+)\s*$", text)
+        if not marker or int(marker.group(2)) != expected_chunks:
+            continue
+        index = int(marker.group(1))
+        if 1 <= index <= expected_chunks:
+            by_index.setdefault(index, memory_id)
+    if set(by_index) != set(range(1, expected_chunks + 1)):
+        return []
+    return [by_index[index] for index in range(1, expected_chunks + 1)]
+
+
+def try_find_import_memories(
+    filename: str,
+    file_hash: str,
+    project_id: str,
+    format_version: int | None = IMPORT_FORMAT_VERSION,
+) -> list[tuple[str, str]] | None:
+    try:
+        return find_import_memories(filename, file_hash, project_id, format_version)
+    except Exception as exc:
+        log_error(f"核对自动导入记忆失败 {type(exc).__name__}")
+        return None
 
 
 def try_find_import_memory_ids(
@@ -1161,11 +1404,10 @@ def try_find_import_memory_ids(
     project_id: str,
     format_version: int | None = IMPORT_FORMAT_VERSION,
 ) -> list[str] | None:
-    try:
-        return find_import_memory_ids(filename, file_hash, project_id, format_version)
-    except Exception as exc:
-        log_error(f"核对自动导入记忆失败 {type(exc).__name__}")
+    memories = try_find_import_memories(filename, file_hash, project_id, format_version)
+    if memories is None:
         return None
+    return [memory_id for memory_id, _ in memories]
 
 
 def add_import_chunk(text: str, project_id: str) -> None:
@@ -1224,6 +1466,32 @@ def save_import_scope_state(scope: str, scope_state: dict[str, Any]) -> None:
         release_lock(lock_path)
 
 
+def state_memory_ids(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return list(
+        dict.fromkeys(
+            memory_id
+            for memory_id in value
+            if isinstance(memory_id, str) and memory_id
+        )
+    )
+
+
+def save_import_id_progress(
+    scope: str,
+    scope_state: dict[str, Any],
+    filename: str,
+    field: str,
+    memory_ids: list[str],
+) -> None:
+    entry = scope_state.get(filename)
+    if not isinstance(entry, dict):
+        return
+    entry[field] = memory_ids
+    save_import_scope_state(scope, scope_state)
+
+
 def _auto_import_project_files(cwd: str | None, project_id: str) -> None:
     """导入声明式项目文件，并用本地哈希避免重复写入。"""
     root = git_root(cwd)
@@ -1244,49 +1512,81 @@ def _auto_import_project_files(cwd: str | None, project_id: str) -> None:
     for filename in TARGET_PROJECT_FILES:
         path = next((directory / filename for directory in search_dirs if (directory / filename).is_file()), None)
         previous = scope_state.get(filename, {})
+        had_previous = filename in scope_state
         previous_hash = previous.get("sha256", "") if isinstance(previous, dict) else ""
         previous_format = previous.get("format_version") if isinstance(previous, dict) else None
+        previous_ids = state_memory_ids(previous.get("memory_ids", [])) if isinstance(previous, dict) else []
         pending = bool(previous.get("pending")) if isinstance(previous, dict) else False
         fallback_hash = previous.get("previous_hash", "") if pending else ""
         fallback_format = previous.get("previous_format_version") if pending else None
-        fallback_ids = previous.get("previous_memory_ids", []) if pending else []
-        if not isinstance(fallback_ids, list):
-            fallback_ids = []
-        fallback_ids = [
-            memory_id
-            for memory_id in fallback_ids
-            if isinstance(memory_id, str) and memory_id
-        ]
-        if path is None:
-            cleanup_targets = list(
-                dict.fromkeys(
-                    (file_hash, format_version)
-                    for file_hash, format_version in (
-                        (previous_hash, previous_format),
-                        (fallback_hash, fallback_format),
-                    )
-                    if isinstance(file_hash, str) and file_hash
+        fallback_ids = (
+            state_memory_ids(previous.get("previous_memory_ids", []))
+            if pending and isinstance(previous, dict)
+            else []
+        )
+        raw: bytes | None = None
+        if path is not None:
+            try:
+                with path.open("rb") as handle:
+                    raw = handle.read(MAX_IMPORT_FILE_SIZE + 1)
+            except OSError:
+                continue
+        too_large = raw is not None and len(raw) > MAX_IMPORT_FILE_SIZE
+        if path is None or too_large:
+            if too_large:
+                log_error(f"停止导入过大的 {filename}")
+            cleanup_targets = [
+                (file_hash, format_version, field)
+                for file_hash, format_version, field in (
+                    (previous_hash, previous_format, "memory_ids"),
+                    (
+                        fallback_hash,
+                        fallback_format,
+                        "previous_memory_ids",
+                    ),
                 )
+                if isinstance(file_hash, str) and file_hash
+            ]
+            cleanup_succeeded = (
+                not isinstance(previous, dict) or not previous or bool(cleanup_targets)
             )
-            cleanup_succeeded = bool(cleanup_targets)
-            for old_hash, old_format in cleanup_targets:
-                old_ids = try_find_import_memory_ids(
+            for old_hash, old_format, field in cleanup_targets:
+                found_ids = try_find_import_memory_ids(
                     filename,
                     old_hash,
                     project_id,
                     format_version=old_format if isinstance(old_format, int) else None,
                 )
-                if old_ids is None or not delete_memories(old_ids, project_id):
+                if found_ids is None:
                     cleanup_succeeded = False
-            if cleanup_succeeded:
+                    continue
+                old_ids = list(dict.fromkeys(found_ids))
+                if not old_ids:
+                    continue
+                save_import_id_progress(
+                    scope,
+                    scope_state,
+                    filename,
+                    field,
+                    old_ids,
+                )
+                if not delete_memories(
+                    old_ids,
+                    project_id,
+                    progress=lambda remaining, field=field: save_import_id_progress(
+                        scope,
+                        scope_state,
+                        filename,
+                        field,
+                        remaining,
+                    ),
+                ):
+                    cleanup_succeeded = False
+            if cleanup_succeeded and had_previous:
                 scope_state.pop(filename, None)
                 changed = True
             continue
-        try:
-            raw = path.read_bytes()
-        except OSError:
-            continue
-        if len(raw) > MAX_IMPORT_FILE_SIZE:
+        if raw is None:
             continue
         file_hash = hashlib.sha256(raw).hexdigest()
         cleanup_hash = ""
@@ -1297,34 +1597,85 @@ def _auto_import_project_files(cwd: str | None, project_id: str) -> None:
             and previous.get("sha256") == file_hash
             and previous.get("format_version") == IMPORT_FORMAT_VERSION
         ):
-            existing_ids = try_find_import_memory_ids(filename, file_hash, project_id)
-            if existing_ids is None:
+            existing_memories = try_find_import_memories(filename, file_hash, project_id)
+            if existing_memories is None:
                 continue
+            existing_ids = [memory_id for memory_id, _ in existing_memories]
             expected_chunks = previous.get("chunks", 1)
             if not isinstance(expected_chunks, int) or expected_chunks < 1:
                 expected_chunks = 1
-            if len(existing_ids) >= expected_chunks:
-                if fallback_ids:
-                    if not delete_memories(fallback_ids, project_id):
-                        continue
-                elif isinstance(fallback_hash, str) and fallback_hash:
-                    old_ids = try_find_import_memory_ids(
+            complete_ids = complete_import_chunk_ids(existing_memories, expected_chunks)
+            if complete_ids:
+                extra_ids = [
+                    memory_id for memory_id in existing_ids if memory_id not in complete_ids
+                ]
+                if previous.get("memory_ids") != complete_ids:
+                    previous["memory_ids"] = complete_ids
+                    save_import_scope_state(scope, scope_state)
+                if extra_ids and not delete_memories(extra_ids, project_id):
+                    continue
+                if isinstance(fallback_hash, str) and fallback_hash:
+                    found_old_ids = try_find_import_memory_ids(
                         filename,
                         fallback_hash,
                         project_id,
                         format_version=fallback_format if isinstance(fallback_format, int) else None,
                     )
-                    if old_ids is None or not delete_memories(old_ids, project_id):
+                    if found_old_ids is None:
                         continue
-                if previous.get("memory_ids") != existing_ids or previous.get("pending"):
-                    previous["memory_ids"] = existing_ids
+                    found_old_ids = [
+                        memory_id
+                        for memory_id in found_old_ids
+                        if memory_id not in complete_ids
+                    ]
+                    old_ids = list(dict.fromkeys(found_old_ids))
+                    if old_ids:
+                        save_import_id_progress(
+                            scope,
+                            scope_state,
+                            filename,
+                            "previous_memory_ids",
+                            old_ids,
+                        )
+                        if not delete_memories(
+                            old_ids,
+                            project_id,
+                            progress=lambda remaining: save_import_id_progress(
+                                scope,
+                                scope_state,
+                                filename,
+                                "previous_memory_ids",
+                                remaining,
+                            ),
+                        ):
+                            continue
+                if previous.get("memory_ids") != complete_ids or previous.get("pending"):
+                    previous["memory_ids"] = complete_ids
                     previous.pop("pending", None)
                     previous.pop("previous_hash", None)
                     previous.pop("previous_format_version", None)
                     previous.pop("previous_memory_ids", None)
                     changed = True
                 continue
-            if not delete_memories(existing_ids, project_id):
+            if existing_ids:
+                save_import_id_progress(
+                    scope,
+                    scope_state,
+                    filename,
+                    "memory_ids",
+                    existing_ids,
+                )
+            if not delete_memories(
+                existing_ids,
+                project_id,
+                progress=lambda remaining: save_import_id_progress(
+                    scope,
+                    scope_state,
+                    filename,
+                    "memory_ids",
+                    remaining,
+                ),
+            ):
                 continue
             if isinstance(fallback_hash, str) and fallback_hash:
                 cleanup_hash = fallback_hash
@@ -1332,13 +1683,34 @@ def _auto_import_project_files(cwd: str | None, project_id: str) -> None:
                 cleanup_ids = list(fallback_ids)
         else:
             if pending and isinstance(previous_hash, str) and previous_hash:
-                staged_ids = try_find_import_memory_ids(
+                found_staged_ids = try_find_import_memory_ids(
                     filename,
                     previous_hash,
                     project_id,
                     format_version=previous_format if isinstance(previous_format, int) else None,
                 )
-                if staged_ids is None or not delete_memories(staged_ids, project_id):
+                if found_staged_ids is None:
+                    continue
+                staged_ids = list(dict.fromkeys(found_staged_ids))
+                if staged_ids:
+                    save_import_id_progress(
+                        scope,
+                        scope_state,
+                        filename,
+                        "memory_ids",
+                        staged_ids,
+                    )
+                if not delete_memories(
+                    staged_ids,
+                    project_id,
+                    progress=lambda remaining: save_import_id_progress(
+                        scope,
+                        scope_state,
+                        filename,
+                        "memory_ids",
+                        remaining,
+                    ),
+                ):
                     continue
                 cleanup_hash = fallback_hash if isinstance(fallback_hash, str) else ""
                 cleanup_format = fallback_format if isinstance(fallback_format, int) else None
@@ -1346,6 +1718,7 @@ def _auto_import_project_files(cwd: str | None, project_id: str) -> None:
             elif isinstance(previous_hash, str) and previous_hash:
                 cleanup_hash = previous_hash
                 cleanup_format = previous_format if isinstance(previous_format, int) else None
+                cleanup_ids = list(previous_ids)
                 if cleanup_hash == file_hash and cleanup_format is None:
                     old_ids = try_find_import_memory_ids(
                         filename,
@@ -1355,18 +1728,39 @@ def _auto_import_project_files(cwd: str | None, project_id: str) -> None:
                     )
                     if old_ids is None:
                         continue
-                    cleanup_ids = old_ids
+                    cleanup_ids = list(dict.fromkeys(old_ids))
         content = redact_sensitive(raw.decode("utf-8", errors="replace"))
         chunks = split_import_content(content, filename.lower().endswith(".md"))
         if not chunks and cleanup_hash:
-            old_ids = try_find_import_memory_ids(
+            found_old_ids = try_find_import_memory_ids(
                 filename,
                 cleanup_hash,
                 project_id,
                 format_version=cleanup_format,
             )
-            if old_ids is None or not delete_memories(old_ids, project_id):
+            if found_old_ids is None:
                 continue
+            old_ids = list(dict.fromkeys(found_old_ids))
+            if old_ids:
+                save_import_id_progress(
+                    scope,
+                    scope_state,
+                    filename,
+                    "memory_ids",
+                    old_ids,
+                )
+                if not delete_memories(
+                    old_ids,
+                    project_id,
+                    progress=lambda remaining: save_import_id_progress(
+                        scope,
+                        scope_state,
+                        filename,
+                        "memory_ids",
+                        remaining,
+                    ),
+                ):
+                    continue
         if not chunks:
             if filename in scope_state:
                 scope_state.pop(filename, None)
@@ -1407,33 +1801,59 @@ def _auto_import_project_files(cwd: str | None, project_id: str) -> None:
             if cleanup_ids:
                 scope_state[filename]["previous_memory_ids"] = cleanup_ids
         save_import_scope_state(scope, scope_state)
-        failed = False
         with ThreadPoolExecutor(max_workers=min(4, len(memories))) as executor:
             futures = [executor.submit(add_import_chunk, memory, project_id) for memory in memories]
             for future in as_completed(futures):
                 try:
                     future.result()
                 except Exception as exc:
-                    failed = True
                     log_error(f"自动导入 {filename} 失败 {type(exc).__name__}")
-        new_ids = try_find_import_memory_ids(filename, file_hash, project_id)
-        if new_ids is None:
+        new_memories = try_find_import_memories(filename, file_hash, project_id)
+        if new_memories is None:
             continue
-        if failed or len(new_ids) < len(memories):
+        all_new_ids = [memory_id for memory_id, _ in new_memories]
+        new_ids = complete_import_chunk_ids(new_memories, len(memories))
+        if not new_ids:
             log_error(f"自动导入 {filename} 未能验证全部分块")
             continue
-        if cleanup_ids:
-            if not delete_memories(cleanup_ids, project_id):
-                continue
-        elif cleanup_hash:
-            old_ids = try_find_import_memory_ids(
+        extra_ids = [memory_id for memory_id in all_new_ids if memory_id not in new_ids]
+        scope_state[filename]["memory_ids"] = new_ids
+        save_import_scope_state(scope, scope_state)
+        if extra_ids and not delete_memories(extra_ids, project_id):
+            continue
+        if cleanup_hash:
+            found_old_ids = try_find_import_memory_ids(
                 filename,
                 cleanup_hash,
                 project_id,
                 format_version=cleanup_format,
             )
-            if old_ids is None or not delete_memories(old_ids, project_id):
+            if found_old_ids is None:
                 continue
+            found_old_ids = [
+                memory_id for memory_id in found_old_ids if memory_id not in new_ids
+            ]
+            old_ids = list(dict.fromkeys(found_old_ids))
+            if old_ids:
+                save_import_id_progress(
+                    scope,
+                    scope_state,
+                    filename,
+                    "previous_memory_ids",
+                    old_ids,
+                )
+                if not delete_memories(
+                    old_ids,
+                    project_id,
+                    progress=lambda remaining: save_import_id_progress(
+                        scope,
+                        scope_state,
+                        filename,
+                        "previous_memory_ids",
+                        remaining,
+                    ),
+                ):
+                    continue
         scope_state[filename] = {
             "sha256": file_hash,
             "format_version": IMPORT_FORMAT_VERSION,
@@ -1537,21 +1957,22 @@ def file_context(
 
 def flatten_text(value: Any, limit: int = 30_000) -> str:
     parts: list[str] = []
-
-    def visit(item: Any) -> None:
-        if sum(len(part) for part in parts) >= limit:
-            return
+    remaining = max(0, limit)
+    stack = [value]
+    while stack and remaining > 0:
+        item = stack.pop()
         if isinstance(item, str):
-            parts.append(item)
+            separator = 1 if parts else 0
+            if remaining <= separator:
+                break
+            part = item[: remaining - separator]
+            parts.append(part)
+            remaining -= len(part) + separator
         elif isinstance(item, dict):
-            for child in item.values():
-                visit(child)
+            stack.extend(reversed(list(item.values())))
         elif isinstance(item, list):
-            for child in item:
-                visit(child)
-
-    visit(value)
-    return "\n".join(parts)[:limit]
+            stack.extend(reversed(item))
+    return "\n".join(parts)
 
 
 def error_signature(tool_input: Any, tool_response: Any) -> str:
@@ -1636,7 +2057,7 @@ def handle_pre_tool(
         blocked = next((path for path in tool_paths(tool_input) if is_managed_memory_path(path)), "")
         if blocked:
             emit_pretool_denied(
-                f"禁止直接写入 {blocked}；请使用自托管 Mem0 的 add_memory 工具保存长期记忆。"
+                "禁止直接写入托管记忆文件；请使用自托管 Mem0 的 add_memory 工具保存长期记忆。"
             )
         else:
             emit("PreToolUse")
@@ -1856,12 +2277,12 @@ def self_test() -> None:
         schema = tool.get("inputSchema", {})
         properties = schema.get("properties", {}) if isinstance(schema, dict) else {}
         capabilities[str(tool.get("name"))] = sorted(properties) if isinstance(properties, dict) else []
-    url, _ = load_connection()
+    load_connection()
     print(
         json.dumps(
             {
                 "状态": "通过",
-                "地址": url,
+                "地址": "已安全配置",
                 "工具": sorted(MEM0_TOOL_NAMES),
                 "参数": capabilities,
                 "契约": "与快照一致",
@@ -1915,8 +2336,9 @@ def main() -> int:
                 action = "当前范围"
             print(json.dumps({"状态": action, "project_id": project_id}, ensure_ascii=True))
             return 0
-        except (IndexError, ValueError) as exc:
-            print(json.dumps({"状态": "失败", "错误": str(exc)}, ensure_ascii=True), file=sys.stderr)
+        except (IndexError, OSError, TimeoutError, ValueError) as exc:
+            error = redact_sensitive(str(exc)) or type(exc).__name__
+            print(json.dumps({"状态": "失败", "错误": error}, ensure_ascii=True), file=sys.stderr)
             return 2
 
     if "--check" in sys.argv:
@@ -1936,7 +2358,7 @@ def main() -> int:
             return 1
 
     try:
-        hook_input = json.load(sys.stdin)
+        hook_input = load_hook_input(sys.stdin)
         if not isinstance(hook_input, dict):
             raise ValueError("钩子输入必须是 JSON 对象")
         handle_event(hook_input)

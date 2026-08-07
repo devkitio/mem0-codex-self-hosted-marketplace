@@ -4,7 +4,10 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
 import tempfile
+import threading
+import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import redirect_stderr, redirect_stdout
@@ -102,8 +105,8 @@ class Mem0SelfHostedTests(unittest.TestCase):
         context.__enter__.return_value = response
         context.__exit__.return_value = False
         with mock.patch.object(mem0, "load_connection", return_value=("https://mem0.test/mcp", "token")), mock.patch.object(
-            mem0.urllib.request,
-            "urlopen",
+            mem0,
+            "open_mcp_request",
             return_value=context,
         ):
             with self.assertRaisesRegex(RuntimeError, "响应超过大小限制"):
@@ -125,14 +128,62 @@ class Mem0SelfHostedTests(unittest.TestCase):
         context.__enter__.return_value = response
         context.__exit__.return_value = False
         with mock.patch.object(mem0, "load_connection", return_value=("https://mem0.test/mcp", "token")), mock.patch.object(
-            mem0.urllib.request,
-            "urlopen",
+            mem0,
+            "open_mcp_request",
             return_value=context,
         ):
             with self.assertRaisesRegex(RuntimeError, "^MCP 返回错误$") as raised:
                 mem0.mcp_request("tools/list", {})
 
         self.assertNotIn("sentinel-secret", str(raised.exception))
+
+    def test_MCP_地址和重定向不会泄漏令牌(self):
+        for url in (
+            "http://10.20.30.40/mcp",
+            "ftp://mem0.test/mcp",
+            "https://user:password@mem0.test/mcp",
+            "https://mem0.test/mcp#fragment",
+        ):
+            with self.subTest(url=url), self.assertRaises(RuntimeError):
+                mem0.validate_mcp_url(url)
+
+        mem0.validate_mcp_url("https://mem0.test/mcp")
+        mem0.validate_mcp_url("http://127.0.0.1:8080/mcp")
+        mem0.validate_mcp_url("http://[::1]:8080/mcp")
+
+        request = mem0.urllib.request.Request(
+            "https://mem0.test/mcp",
+            data=b"{}",
+            method="POST",
+        )
+        request.add_unredirected_header("Authorization", "Bearer sentinel-secret")
+        handler = mem0.SameOriginRedirectHandler()
+        with self.assertRaisesRegex(RuntimeError, "跨源重定向"):
+            handler.redirect_request(
+                request,
+                None,
+                302,
+                "Found",
+                {},
+                "https://other.test/mcp",
+            )
+
+        redirected = handler.redirect_request(
+            request,
+            None,
+            302,
+            "Found",
+            {},
+            "https://mem0.test/next",
+        )
+        self.assertIsNotNone(redirected)
+        self.assertEqual(redirected.get_header("Authorization"), "Bearer sentinel-secret")
+        self.assertNotIn("Authorization", redirected.headers)
+
+    def test_钩子输入限制大小(self):
+        with mock.patch.object(mem0, "MAX_HOOK_INPUT_BYTES", 32):
+            with self.assertRaisesRegex(ValueError, "超过大小限制"):
+                mem0.load_hook_input(io.StringIO('{"prompt":"' + "x" * 64 + '"}'))
 
     def test_JSON_形式敏感信息会脱敏(self):
         original = json.dumps(
@@ -148,6 +199,59 @@ class Mem0SelfHostedTests(unittest.TestCase):
         self.assertNotIn("password-secret", redacted)
         self.assertNotIn("auth-secret", redacted)
         self.assertEqual(redacted.count("[已脱敏]"), 3)
+
+    def test_跨平台路径地址和通用凭据会脱敏(self):
+        original = (
+            "AWS_SECRET_ACCESS_KEY=aws-secret "
+            "DATABASE_URL=postgres://alice:db-secret@db.internal/app "
+            "C:/Users/Alice/private/file.py "
+            "/home/bob/private/file.py "
+            "/Users/carol/private/file.py "
+            "10.20.30.40 [2001:db8::1] 2001:db8::2\n"
+            "Error: Bearer bare-bearer-secret；Token bare-token-secret\n"
+            "Authorization: Basic dXNlcjpwYXNz"
+        )
+        redacted = mem0.redact_sensitive(original)
+        for secret in (
+            "aws-secret",
+            "alice:db-secret",
+            "C:/Users/Alice",
+            "/home/bob",
+            "/Users/carol",
+            "10.20.30.40",
+            "2001:db8::1",
+            "2001:db8::2",
+            "bare-bearer-secret",
+            "bare-token-secret",
+            "dXNlcjpwYXNz",
+        ):
+            self.assertNotIn(secret, redacted)
+
+        context = mem0.format_context(
+            {
+                "structuredContent": {
+                    "results": [{"id": "memory-1", "memory": original}]
+                }
+            }
+        )
+        self.assertNotIn("aws-secret", context)
+        self.assertNotIn("10.20.30.40", context)
+        self.assertIn("[mem0:memory-1]", context)
+
+    def test_原子写入并发使用独立临时文件(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "state.json"
+            values = [{"value": index} for index in range(24)]
+            with ThreadPoolExecutor(max_workers=8) as executor:
+                futures = [
+                    executor.submit(mem0.atomic_write_json, path, value)
+                    for value in values
+                ]
+                for future in futures:
+                    future.result()
+
+            self.assertIn(mem0.load_json_file(path, {}), values)
+            self.assertEqual(list(path.parent.glob(f".{path.name}.*.tmp")), [])
 
     def test_自动导入会合并短章节并限制分块数量(self):
         short_sections = "\n".join(
@@ -273,6 +377,36 @@ class Mem0SelfHostedTests(unittest.TestCase):
         self.assertEqual(specific["permissionDecision"], "deny")
         self.assertIn("add_memory", specific["permissionDecisionReason"])
 
+        managed_paths = (
+            r"C:\Users\Alice\.codex\memories\长期 记忆.md",
+            r"\\server\share\.codex\memories\MEMORY.md",
+            "/home/alice/.codex/memories/长期 记忆.md",
+            "/Users/alice/.codex/memories/MEMORY.md",
+        )
+        for path in managed_paths:
+            with self.subTest(path=path):
+                self.assertEqual(mem0.tool_paths({"file_path": path}), [path])
+                denied = self.capture_json(
+                    mem0.handle_pre_tool,
+                    {
+                        "tool_name": "Write",
+                        "tool_input": {"file_path": path},
+                    },
+                    "demo-project",
+                )
+                reason = denied["hookSpecificOutput"]["permissionDecisionReason"]
+                self.assertNotIn(path, reason)
+                self.assertEqual(
+                    denied["hookSpecificOutput"]["permissionDecision"],
+                    "deny",
+                )
+
+        patch_path = "/Users/alice/.codex/memories/长期 记忆.md"
+        self.assertIn(
+            patch_path,
+            mem0.tool_paths({"patch": f"*** Update File: {patch_path}\n"}),
+        )
+
     def test_命令错误签名会脱敏(self):
         signature = mem0.error_signature(
             {"command": "python app.py"},
@@ -280,6 +414,22 @@ class Mem0SelfHostedTests(unittest.TestCase):
         )
         self.assertIn("Traceback", signature)
         self.assertNotIn("abc123", signature)
+
+        bare = mem0.error_signature(
+            {"command": "python app.py"},
+            "Error: Bearer standalone-secret 无法通过认证" * 3,
+        )
+        self.assertIn("Error", bare)
+        self.assertNotIn("standalone-secret", bare)
+
+    def test_错误响应扁平化保持线性性能(self):
+        started = time.perf_counter()
+        flattened = mem0.flatten_text(["x"] * 30_000, 30_000)
+        elapsed = time.perf_counter() - started
+
+        self.assertLessEqual(len(flattened), 30_000)
+        self.assertGreater(len(flattened), 29_000)
+        self.assertLess(elapsed, 2.0)
 
     def test_读文件前检索相关历史(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -470,6 +620,350 @@ class Mem0SelfHostedTests(unittest.TestCase):
                 self.assertNotIn("AGENTS.md", state.get(scope, {}))
                 self.assertFalse(memories)
 
+    def test_自动导入按分块序号验证完整性(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            data = root / "plugin-data"
+            agents = root / "AGENTS.md"
+            agents.write_text("## 规则\n" + "必须验证完整分块。\n" * 1200, encoding="utf-8")
+            file_hash = hashlib.sha256(agents.read_bytes()).hexdigest()
+            old_hash = "old-hash"
+            memories = {
+                "current-a": (
+                    "[mem0:auto-import]\n项目：demo-project\n来源文件：AGENTS.md\n"
+                    f"内容哈希：{file_hash}\n导入格式：{mem0.IMPORT_FORMAT_VERSION}\n"
+                    "分块：1/2\n\n第一块"
+                ),
+                "current-b": (
+                    "[mem0:auto-import]\n项目：demo-project\n来源文件：AGENTS.md\n"
+                    f"内容哈希：{file_hash}\n导入格式：{mem0.IMPORT_FORMAT_VERSION}\n"
+                    "分块：1/2\n\n重复第一块"
+                ),
+                "foreign-2": (
+                    "[mem0:auto-import]\n项目：demo-project-other\n来源文件：AGENTS.md\n"
+                    f"内容哈希：{file_hash}\n导入格式：{mem0.IMPORT_FORMAT_VERSION}\n"
+                    "分块：2/2\n\n其他项目的第二块"
+                ),
+                "old-1": (
+                    "[mem0:auto-import]\n项目：demo-project\n来源文件：AGENTS.md\n"
+                    f"内容哈希：{old_hash}\n导入格式：2\n分块：1/1\n\n旧内容"
+                ),
+            }
+            scope = mem0.import_scope_key(root, "demo-project")
+            mem0.atomic_write_json(
+                data / "auto_import_state.json",
+                {
+                    scope: {
+                        "AGENTS.md": {
+                            "sha256": file_hash,
+                            "format_version": mem0.IMPORT_FORMAT_VERSION,
+                            "memory_ids": ["current-a", "current-b"],
+                            "chunks": 2,
+                            "pending": True,
+                            "previous_hash": old_hash,
+                            "previous_format_version": 2,
+                            "previous_memory_ids": ["old-1"],
+                        }
+                    }
+                },
+            )
+
+            def fake_call(name, arguments):
+                if name == "search_memories":
+                    return {
+                        "structuredContent": {
+                            "results": [
+                                {"id": memory_id, "memory": text}
+                                for memory_id, text in memories.items()
+                            ]
+                        }
+                    }
+                if name == "delete_memory":
+                    memories.pop(arguments["memory_id"], None)
+                    return {}
+                if name == "add_memory":
+                    raise RuntimeError("阻止本次重建")
+                return {}
+
+            with mock.patch.object(mem0, "PLUGIN_DATA", data), mock.patch.object(
+                mem0, "git_root", return_value=root
+            ), mock.patch.object(mem0, "resolve_branch", return_value="main"), mock.patch.object(
+                mem0, "call_tool", side_effect=fake_call
+            ):
+                mem0.auto_import_project_files(str(root), "demo-project")
+
+            state = mem0.load_json_file(data / "auto_import_state.json", {})
+            self.assertTrue(state[scope]["AGENTS.md"]["pending"])
+            self.assertIn("old-1", memories)
+            self.assertNotIn("current-a", memories)
+            self.assertNotIn("current-b", memories)
+            self.assertIn("foreign-2", memories)
+
+    def test_自动导入部分清理会持久化剩余旧ID(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            data = root / "plugin-data"
+            agents = root / "AGENTS.md"
+            agents.write_text("## 新规则\n" + "必须验证清理恢复。\n" * 20, encoding="utf-8")
+            new_hash = hashlib.sha256(agents.read_bytes()).hexdigest()
+            old_hash = "legacy-hash"
+            memories = {
+                "old-1": (
+                    "[mem0:auto-import]\n项目：demo-project\n来源文件：AGENTS.md\n"
+                    f"内容哈希：{old_hash}\n导入格式：2\n分块：1/2\n\n旧块一"
+                ),
+                "old-2": (
+                    "[mem0:auto-import]\n项目：demo-project\n来源文件：AGENTS.md\n"
+                    f"内容哈希：{old_hash}\n导入格式：2\n分块：2/2\n\n旧块二"
+                ),
+            }
+            scope = mem0.import_scope_key(root, "demo-project")
+            mem0.atomic_write_json(
+                data / "auto_import_state.json",
+                {
+                    scope: {
+                        "AGENTS.md": {
+                            "sha256": old_hash,
+                            "format_version": 2,
+                            "memory_ids": ["old-1", "old-2"],
+                            "chunks": 2,
+                        }
+                    }
+                },
+            )
+            delete_calls: list[str] = []
+            failed_once = False
+            next_id = 0
+
+            def fake_call(name, arguments):
+                nonlocal failed_once, next_id
+                if name == "add_memory":
+                    next_id += 1
+                    memories[f"new-{next_id}"] = arguments["text"]
+                    return {}
+                if name == "search_memories":
+                    return {
+                        "structuredContent": {
+                            "results": [
+                                {"id": memory_id, "memory": text}
+                                for memory_id, text in memories.items()
+                            ]
+                        }
+                    }
+                if name == "delete_memory":
+                    memory_id = arguments["memory_id"]
+                    delete_calls.append(memory_id)
+                    if memory_id == "old-2" and not failed_once:
+                        failed_once = True
+                        raise RuntimeError("临时删除失败")
+                    if memory_id not in memories:
+                        raise RuntimeError("记忆不存在")
+                    memories.pop(memory_id)
+                    return {}
+                return {}
+
+            with mock.patch.object(mem0, "PLUGIN_DATA", data), mock.patch.object(
+                mem0, "git_root", return_value=root
+            ), mock.patch.object(mem0, "resolve_branch", return_value="main"), mock.patch.object(
+                mem0, "call_tool", side_effect=fake_call
+            ):
+                mem0.auto_import_project_files(str(root), "demo-project")
+                state = mem0.load_json_file(data / "auto_import_state.json", {})
+                self.assertEqual(
+                    state[scope]["AGENTS.md"]["previous_memory_ids"],
+                    ["old-2"],
+                )
+                mem0.auto_import_project_files(str(root), "demo-project")
+
+            state = mem0.load_json_file(data / "auto_import_state.json", {})
+            self.assertNotIn("pending", state[scope]["AGENTS.md"])
+            self.assertNotIn("previous_memory_ids", state[scope]["AGENTS.md"])
+            self.assertEqual(delete_calls.count("old-1"), 1)
+            self.assertEqual(delete_calls.count("old-2"), 2)
+            self.assertNotIn("old-1", memories)
+            self.assertNotIn("old-2", memories)
+            self.assertEqual(state[scope]["AGENTS.md"]["sha256"], new_hash)
+
+    def test_删除项目文件不会删除标记不匹配的状态ID(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            data = root / "plugin-data"
+            scope = mem0.import_scope_key(root, "demo-project")
+            mem0.atomic_write_json(
+                data / "auto_import_state.json",
+                {
+                    scope: {
+                        "AGENTS.md": {
+                            "sha256": "old-hash",
+                            "format_version": mem0.IMPORT_FORMAT_VERSION,
+                            "memory_ids": ["old-1"],
+                            "chunks": 1,
+                        }
+                    }
+                },
+            )
+            deleted: list[str] = []
+
+            def fake_call(name, arguments):
+                if name == "search_memories":
+                    return {
+                        "structuredContent": {
+                            "results": [
+                                {
+                                    "id": "old-1",
+                                    "memory": (
+                                        "[mem0:auto-import]\n项目：other-project\n"
+                                        "来源文件：AGENTS.md\n内容哈希：old-hash\n"
+                                        f"导入格式：{mem0.IMPORT_FORMAT_VERSION}\n分块：1/1"
+                                    ),
+                                }
+                            ]
+                        }
+                    }
+                if name == "delete_memory":
+                    deleted.append(arguments["memory_id"])
+                return {}
+
+            with mock.patch.object(mem0, "PLUGIN_DATA", data), mock.patch.object(
+                mem0, "git_root", return_value=root
+            ), mock.patch.object(mem0, "call_tool", side_effect=fake_call):
+                mem0.auto_import_project_files(str(root), "demo-project")
+
+            state = mem0.load_json_file(data / "auto_import_state.json", {})
+            self.assertEqual(deleted, [])
+            self.assertNotIn("AGENTS.md", state.get(scope, {}))
+
+    def test_远端未返回的旧ID不会调用删除且状态会收敛(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            data = root / "plugin-data"
+            scope = mem0.import_scope_key(root, "demo-project")
+            mem0.atomic_write_json(
+                data / "auto_import_state.json",
+                {
+                    scope: {
+                        "AGENTS.md": {
+                            "sha256": "old-hash",
+                            "format_version": mem0.IMPORT_FORMAT_VERSION,
+                            "memory_ids": ["missing-1"],
+                            "chunks": 1,
+                        }
+                    }
+                },
+            )
+            delete_calls: list[str] = []
+
+            def fake_call(name, arguments):
+                if name == "search_memories":
+                    return {"structuredContent": {"results": []}}
+                if name == "delete_memory":
+                    delete_calls.append(arguments["memory_id"])
+                    raise RuntimeError("记忆不存在")
+                return {}
+
+            with mock.patch.object(mem0, "PLUGIN_DATA", data), mock.patch.object(
+                mem0, "git_root", return_value=root
+            ), mock.patch.object(mem0, "call_tool", side_effect=fake_call):
+                mem0.auto_import_project_files(str(root), "demo-project")
+
+            state = mem0.load_json_file(data / "auto_import_state.json", {})
+            self.assertEqual(delete_calls, [])
+            self.assertNotIn("AGENTS.md", state.get(scope, {}))
+
+    def test_项目文件变得过大后会安全清理旧导入(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            data = root / "plugin-data"
+            agents = root / "AGENTS.md"
+            agents.write_text("## 规则\n" + "必须保持规则最新。\n" * 20, encoding="utf-8")
+            memories: dict[str, str] = {}
+            delete_calls: list[str] = []
+            next_id = 0
+
+            def fake_call(name, arguments):
+                nonlocal next_id
+                if name == "add_memory":
+                    next_id += 1
+                    memories[f"m-{next_id}"] = arguments["text"]
+                    return {}
+                if name == "search_memories":
+                    return {
+                        "structuredContent": {
+                            "results": [
+                                {"id": memory_id, "memory": text}
+                                for memory_id, text in memories.items()
+                            ]
+                        }
+                    }
+                if name == "delete_memory":
+                    memory_id = arguments["memory_id"]
+                    delete_calls.append(memory_id)
+                    memories.pop(memory_id)
+                return {}
+
+            with mock.patch.object(mem0, "PLUGIN_DATA", data), mock.patch.object(
+                mem0, "git_root", return_value=root
+            ), mock.patch.object(mem0, "resolve_branch", return_value="main"), mock.patch.object(
+                mem0, "call_tool", side_effect=fake_call
+            ):
+                mem0.auto_import_project_files(str(root), "demo-project")
+                scope = mem0.import_scope_key(root, "demo-project")
+                state = mem0.load_json_file(data / "auto_import_state.json", {})
+                imported_id = state[scope]["AGENTS.md"]["memory_ids"][0]
+                state[scope]["AGENTS.md"]["memory_ids"].append("state-only-id")
+                mem0.atomic_write_json(data / "auto_import_state.json", state)
+
+                agents.write_bytes(b"x" * (mem0.MAX_IMPORT_FILE_SIZE + 1))
+                mem0.auto_import_project_files(str(root), "demo-project")
+
+            state = mem0.load_json_file(data / "auto_import_state.json", {})
+            self.assertEqual(delete_calls, [imported_id])
+            self.assertNotIn("state-only-id", delete_calls)
+            self.assertEqual(memories, {})
+            self.assertNotIn("AGENTS.md", state.get(scope, {}))
+
+    def test_未变化的完整导入不会重写状态(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            data = root / "plugin-data"
+            agents = root / "AGENTS.md"
+            agents.write_text("## 规则\n" + "必须保持状态稳定。\n" * 20, encoding="utf-8")
+            file_hash = hashlib.sha256(agents.read_bytes()).hexdigest()
+            memory = (
+                "[mem0:auto-import]\n项目：demo-project\n来源文件：AGENTS.md\n"
+                f"内容哈希：{file_hash}\n导入格式：{mem0.IMPORT_FORMAT_VERSION}\n"
+                "分块：1/1\n\n已有内容"
+            )
+            scope = mem0.import_scope_key(root, "demo-project")
+            mem0.atomic_write_json(
+                data / "auto_import_state.json",
+                {
+                    scope: {
+                        "AGENTS.md": {
+                            "sha256": file_hash,
+                            "format_version": mem0.IMPORT_FORMAT_VERSION,
+                            "memory_ids": ["current-1"],
+                            "chunks": 1,
+                        }
+                    }
+                },
+            )
+
+            with mock.patch.object(mem0, "PLUGIN_DATA", data), mock.patch.object(
+                mem0, "git_root", return_value=root
+            ), mock.patch.object(
+                mem0,
+                "call_tool",
+                return_value={
+                    "structuredContent": {
+                        "results": [{"id": "current-1", "memory": memory}]
+                    }
+                },
+            ), mock.patch.object(mem0, "save_import_scope_state") as save_state:
+                mem0._auto_import_project_files(str(root), "demo-project")
+
+            save_state.assert_not_called()
+
     def test_自动导入状态并发合并不同项目(self):
         with tempfile.TemporaryDirectory() as directory:
             data = Path(directory) / "plugin-data"
@@ -566,6 +1060,104 @@ class Mem0SelfHostedTests(unittest.TestCase):
                 self.assertEqual(mem0.resolve_project_id(str(root)), "shared-project")
                 self.assertEqual(mem0.set_project_mapping(str(root), None), root.name)
                 self.assertEqual(mem0.resolve_project_id(str(root)), root.name)
+
+    def test_项目标识与生产契约一致(self):
+        with tempfile.TemporaryDirectory() as directory:
+            data = Path(directory) / "plugin-data"
+            root = Path(directory) / "中文 项目"
+            root.mkdir()
+            with mock.patch.object(mem0, "PLUGIN_DATA", data), mock.patch.object(
+                mem0, "git_root", return_value=root
+            ):
+                generated = mem0.resolve_project_id(str(root))
+                self.assertRegex(generated, r"^[A-Za-z0-9._-]{1,64}$")
+                self.assertEqual(generated, mem0.default_project_id(root))
+                output = io.StringIO()
+                with mock.patch.object(
+                    mem0.sys,
+                    "argv",
+                    [str(SCRIPT), "--current-project", "--cwd", str(root)],
+                ), redirect_stdout(output):
+                    self.assertEqual(mem0.main(), 0)
+                self.assertEqual(json.loads(output.getvalue())["project_id"], generated)
+                self.assertEqual(
+                    mem0.set_project_mapping(str(root), "team.alpha_1-beta"),
+                    "team.alpha_1-beta",
+                )
+                for invalid in ("", "my project", "中文项目", "x" * 65, "team/project"):
+                    with self.subTest(project_id=invalid), self.assertRaises(ValueError):
+                        mem0.set_project_mapping(str(root), invalid)
+
+                mem0.atomic_write_json(
+                    mem0.project_mapping_path(),
+                    {mem0._project_mapping_key(root): "旧版 非法映射"},
+                )
+                self.assertEqual(mem0.resolve_project_id(str(root)), generated)
+
+    def test_项目映射并发更新不会丢失(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            data = base / "plugin-data"
+            roots = [base / f"workspace-{index}" for index in range(12)]
+            for root in roots:
+                root.mkdir()
+            barrier = threading.Barrier(len(roots))
+            original_atomic_write = mem0.atomic_write_json
+
+            def slow_atomic_write(path, value):
+                time.sleep(0.02)
+                original_atomic_write(path, value)
+
+            def update(index):
+                barrier.wait()
+                return mem0.set_project_mapping(str(roots[index]), f"project-{index}")
+
+            with mock.patch.object(mem0, "PLUGIN_DATA", data), mock.patch.object(
+                mem0, "git_root", side_effect=lambda cwd: Path(cwd).resolve()
+            ), mock.patch.object(
+                mem0, "atomic_write_json", side_effect=slow_atomic_write
+            ), ThreadPoolExecutor(max_workers=len(roots)) as executor:
+                futures = [executor.submit(update, index) for index in range(len(roots))]
+                for future in futures:
+                    future.result()
+
+            mappings = mem0.load_json_file(data / "project_mappings.json", {})
+            self.assertEqual(len(mappings), len(roots))
+            for index, root in enumerate(roots):
+                self.assertEqual(
+                    mappings[mem0._project_mapping_key(root.resolve())],
+                    f"project-{index}",
+                )
+
+    def test_git根目录查询在单次进程内缓存(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            completed = mock.Mock(stdout=f"{root}\n")
+            mem0._cached_git_root.cache_clear()
+            try:
+                with mock.patch.object(mem0.subprocess, "run", return_value=completed) as run:
+                    self.assertEqual(mem0.git_root(str(root)), root)
+                    self.assertEqual(mem0.git_root(str(root)), root)
+                    self.assertEqual(mem0.git_root(str(root)), root)
+                run.assert_called_once()
+            finally:
+                mem0._cached_git_root.cache_clear()
+
+    def test_项目状态键遵循当前系统的路径大小写语义(self):
+        first = Path("workspace") / "Project"
+        second = Path("workspace") / "project"
+        expected_same = os.path.normcase(str(first)) == os.path.normcase(str(second))
+
+        self.assertEqual(
+            mem0.import_scope_key(first, "demo-project")
+            == mem0.import_scope_key(second, "demo-project"),
+            expected_same,
+        )
+        with mock.patch.object(mem0, "git_root", return_value=first):
+            first_mapping = mem0.project_mapping_key(str(first))
+        with mock.patch.object(mem0, "git_root", return_value=second):
+            second_mapping = mem0.project_mapping_key(str(second))
+        self.assertEqual(first_mapping == second_mapping, expected_same)
 
     def test_转录提取最近消息和触达文件(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -678,15 +1270,42 @@ class Mem0SelfHostedTests(unittest.TestCase):
                     ]
                     for future in futures:
                         future.result()
-            self.assertEqual(len(calls), 1)
+                mem0.save_summary(
+                    text,
+                    "other-project",
+                    "本轮会话总结",
+                    hook_input,
+                    ["src/app.py"],
+                )
+            self.assertEqual(len(calls), 2)
 
     def test_文档搜索只允许官方主机(self):
         with mock.patch.object(mem0_docs, "fetch_url") as fetch:
             result = mem0_docs.fetch_page("http://127.0.0.1:8080/private")
             invalid_port = mem0_docs.fetch_page("https://docs.mem0.ai:invalid/page")
+            invalid_ipv6 = mem0_docs.fetch_page("https://[bad")
         self.assertIn("error", result)
         self.assertIn("error", invalid_port)
+        self.assertIn("error", invalid_ipv6)
         fetch.assert_not_called()
+
+    def test_文档搜索拒绝跨主机重定向(self):
+        request = mem0_docs.urllib.request.Request("https://docs.mem0.ai/start")
+        handler = mem0_docs.DocsRedirectHandler()
+        with self.assertRaises(mem0_docs.urllib.error.HTTPError):
+            handler.redirect_request(
+                request,
+                None,
+                302,
+                "Found",
+                {},
+                "http://127.0.0.1:8080/private",
+            )
+
+        with mock.patch.object(mem0_docs, "open_docs_request") as open_request:
+            result = mem0_docs.fetch_url("https://example.com/private")
+        self.assertIn("只允许", result)
+        open_request.assert_not_called()
 
     def test_文档搜索限制响应大小(self):
         response = mock.MagicMock()
@@ -694,11 +1313,24 @@ class Mem0SelfHostedTests(unittest.TestCase):
         context = mock.MagicMock()
         context.__enter__.return_value = response
         context.__exit__.return_value = False
-        with mock.patch.object(mem0_docs.urllib.request, "urlopen", return_value=context):
+        with mock.patch.object(mem0_docs, "open_docs_request", return_value=context):
             result = mem0_docs.fetch_url("https://docs.mem0.ai/llms.txt")
 
         self.assertIn("超过大小限制", result)
         response.read.assert_called_once_with(mem0_docs.MAX_RESPONSE_BYTES + 1)
+
+    def test_文档搜索错误不会透传网络详情(self):
+        with mock.patch.object(
+            mem0_docs,
+            "open_docs_request",
+            side_effect=mem0_docs.urllib.error.URLError(
+                "proxy://user:network-secret@internal.example"
+            ),
+        ):
+            result = mem0_docs.fetch_url("https://docs.mem0.ai/llms.txt")
+
+        self.assertEqual(result, "URL 请求失败")
+        self.assertNotIn("network-secret", result)
 
     def test_压缩后会话启动提取并保存真实摘要(self):
         with tempfile.TemporaryDirectory() as directory:
