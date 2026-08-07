@@ -1009,7 +1009,7 @@ def extract_compact_summary(path: str) -> str:
 
 def safe_project_files(files: list[str], cwd: str | None) -> list[str]:
     """只保留项目内相对路径，避免把用户目录写入记忆。"""
-    root = git_root(cwd)
+    root = git_root(cwd).resolve()
     current = Path(cwd or root)
     safe: list[str] = []
     for value in files:
@@ -1514,7 +1514,7 @@ def save_import_id_progress(
 
 def _auto_import_project_files(cwd: str | None, project_id: str) -> None:
     """导入声明式项目文件，并用本地哈希避免重复写入。"""
-    root = git_root(cwd)
+    root = git_root(cwd).resolve()
     current = Path(cwd or root).resolve()
     search_dirs = [current]
     if root != current:
@@ -1937,7 +1937,7 @@ def file_context(
         return ""
     if not path:
         return ""
-    root = git_root(cwd)
+    root = git_root(cwd).resolve()
     candidate = Path(path)
     if not candidate.is_absolute():
         candidate = Path(cwd or root) / candidate

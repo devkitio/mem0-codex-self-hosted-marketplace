@@ -6,6 +6,7 @@ from __future__ import annotations
 import ast
 import json
 import re
+import sys
 from pathlib import Path
 
 
@@ -72,6 +73,9 @@ def load_json(path: Path) -> dict:
 
 
 def main() -> None:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
+
     marketplace = load_json(ROOT / ".agents" / "plugins" / "marketplace.json")
     manifest = load_json(PLUGIN / ".codex-plugin" / "plugin.json")
     mcp = load_json(PLUGIN / ".mcp.json")
