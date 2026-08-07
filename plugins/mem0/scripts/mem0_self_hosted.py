@@ -1514,7 +1514,7 @@ def save_import_id_progress(
 
 def _auto_import_project_files(cwd: str | None, project_id: str) -> None:
     """导入声明式项目文件，并用本地哈希避免重复写入。"""
-    root = git_root(cwd).resolve()
+    root = git_root(cwd)
     current = Path(cwd or root).resolve()
     search_dirs = [current]
     if root != current:
