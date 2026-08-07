@@ -284,7 +284,7 @@ def load_connection() -> tuple[str, str]:
         config = json.load(handle)
     server = config.get("mcpServers", {}).get("mem0", {})
     url = str(server.get("url", "")).strip()
-    token_name = str(server.get("bearer_token_env_var", "MEM0_MCP_TOKEN")).strip()
+    token_name = str(server.get("bearer_token_env_var", "MEM0_SELF_HOSTED_API_KEY")).strip()
     token = os.environ.get(token_name, "").strip()
     if not url:
         raise RuntimeError("插件未配置 mcpServers.mem0.url")

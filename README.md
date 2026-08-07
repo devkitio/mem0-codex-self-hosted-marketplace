@@ -5,7 +5,7 @@
 当前市场连接：
 
 - MCP：`https://mem0-api.jiang.in/mcp`
-- 认证环境变量：`MEM0_MCP_TOKEN`
+- 认证环境变量：`MEM0_SELF_HOSTED_API_KEY`
 - 插件版本：以 `plugins/mem0/.codex-plugin/plugin.json` 为准
 
 仓库不会保存任何 Mem0 令牌或用户记忆。
@@ -20,7 +20,7 @@
 | 技能 | 16 个自托管技能，覆盖初始化、健康检查、记住、查看、置顶、遗忘、整理、导入导出、项目切换和统计 |
 | 项目策略 | 原生解析 `mem0.md` 的 `Settings/Search/Ignore/Identity/Categories/Retention` 六个区段 |
 | 自动记忆 | 智能多查询检索、真实 rerank、质量门禁、90 天默认保留、分类保留、压缩后摘要和跨事件去重 |
-| 安全 | 固定用户与所有者、强制项目边界、敏感信息脱敏、项目内相对路径、批量删除默认关闭 |
+| 安全 | MCP 专用 Key、固定用户与所有者、强制项目边界、敏感信息脱敏、项目内相对路径、批量删除默认关闭 |
 
 旧版 6 个 MCP 工具保持参数兼容；当前插件和未升级的旧客户端仍可继续使用基础读写能力。
 
@@ -31,7 +31,7 @@
 | 对比项 | 官方插件 | 本仓库 |
 | --- | --- | --- |
 | 服务地址 | Mem0 官方 API/MCP | 固定为仓库配置的自托管 MCP |
-| 认证 | `MEM0_API_KEY` 等云端凭据 | 只使用 `MEM0_MCP_TOKEN` |
+| 认证 | `MEM0_API_KEY` 等云端凭据 | 只使用自部署控制台生成且用途为 MCP 的 `MEM0_SELF_HOSTED_API_KEY` |
 | 工具数量 | 官方 9 个主要记忆工具 | 官方语义对应工具加 `get_memory_history`，共 10 个 |
 | 身份范围 | 云端账号、用户与应用语义 | 服务端固定用户和所有者，客户端只选择项目或运行范围 |
 | 实体目录 | 官方云端实体目录 | 从当前 Adapter 管理的记忆推导项目和运行实体 |
@@ -52,19 +52,21 @@
 
 插件运行时只使用 Python 标准库，路径、文件锁、原子状态写入和 UTF-8 数据均兼容 Windows、Linux 与 macOS。项目标识与生产 MCP 保持一致，只允许 1～64 位字母、数字、点、下划线或连字符；仓库根目录名不符合该规则时，运行时会生成稳定的 `project-<哈希>` 标识。
 
-把自托管服务令牌设置为 `MEM0_MCP_TOKEN`。Windows PowerShell 可持久写入当前用户环境：
+在自部署 Mem0 控制台生成并保存一个用途为“Codex MCP（受限）”的新 API Key，然后设置为 `MEM0_SELF_HOSTED_API_KEY`。管理员 REST API Key 不能连接 MCP，MCP Key 也不能访问 `/configure`、`/memories`、`/reset` 等管理员接口。Windows PowerShell 可持久写入当前用户环境：
 
 ```powershell
-[Environment]::SetEnvironmentVariable("MEM0_MCP_TOKEN", "你的令牌", "User")
+[Environment]::SetEnvironmentVariable("MEM0_SELF_HOSTED_API_KEY", "自部署 Mem0 生成的 MCP 用途 API Key", "User")
 ```
 
 macOS/Linux 可加入 shell 配置：
 
 ```bash
-export MEM0_MCP_TOKEN="你的令牌"
+export MEM0_SELF_HOSTED_API_KEY="自部署 Mem0 生成的 MCP 用途 API Key"
 ```
 
 设置后必须完全退出并重新打开 Codex，使新进程能够读取该变量。不要把真实令牌写入仓库、截图或日志。
+
+MCP 只把该 Key 发送到 Mem0 `/auth/introspect` 校验用途和吊销状态，不会把它转发给记忆或配置接口。校验通过后，所有工具操作都改用只挂载在服务器上的内部服务 Secret。
 
 ### 2. 添加 Git 市场并安装插件
 
@@ -236,7 +238,7 @@ codex plugin marketplace add "/path/to/mem0-codex-self-hosted-marketplace"
 codex plugin add mem0@mem0-self-hosted
 ```
 
-真实连通性检查需要先设置 `MEM0_MCP_TOKEN`：
+真实连通性检查需要先设置 `MEM0_SELF_HOSTED_API_KEY`：
 
 ```powershell
 python plugins\mem0\scripts\mem0_self_hosted.py --check
@@ -249,6 +251,8 @@ python3 plugins/mem0/scripts/mem0_self_hosted.py --check
 该命令不仅核对 10 个工具，还会把生产 `tools/list` 的参数、必填项、类型、默认值、枚举和四项 `ToolAnnotations` 与仓库快照比较；发现漂移时返回失败，但不会输出令牌或记忆正文。
 
 GitHub Actions 会在 Ubuntu、Windows 和 macOS 上分别执行仓库校验与完整单元测试。
+
+Linux 任务还会安装 `services/mem0-mcp/requirements.lock` 并运行 Adapter 的鉴权、内部接口和真实 ASGI Bearer 链路测试；生产 Adapter 的 Dockerfile 与锁定源码均位于 `services/mem0-mcp`。
 
 当前实现还通过以下验收：
 

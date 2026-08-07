@@ -1,6 +1,6 @@
 # 自托管运行时约定
 
-本插件运行时只调用 `https://mem0-api.jiang.in/mcp`，并且只使用 `MEM0_MCP_TOKEN` 认证。不得请求 `api.mem0.ai`、`mcp.mem0.ai`，也不得要求 `MEM0_API_KEY`。
+本插件运行时只调用 `https://mem0-api.jiang.in/mcp`，并且只使用 `MEM0_SELF_HOSTED_API_KEY` 认证。该凭据必须由当前自部署 Mem0 控制台生成且用途为 MCP；MCP 只通过 Mem0 `/auth/introspect` 校验用途和吊销状态，不得把客户端 Key 转发给记忆或管理员接口。工具调用只使用服务器挂载的内部服务 Secret。不得请求 `api.mem0.ai`、`mcp.mem0.ai`，也不得使用官方云端 `MEM0_API_KEY`。
 
 钩子客户端兼容 Streamable HTTP 的 `application/json` 与 `text/event-stream` 响应，并按 JSON-RPC 请求 ID 忽略 SSE 中先到达的通知或其他消息。远程 MCP 必须使用 HTTPS，仅回环地址允许 HTTP；认证只跟随同源重定向。只读工具使用 15 秒请求超时，写工具使用 50 秒请求超时，外层钩子超时必须更长。单次 MCP 响应最多读取 2 MB，钩子标准输入最多读取 4 MB，服务端错误正文不得透传。钩子兜底日志只记录异常类型或脱敏后的本地诊断，不记录令牌、用户目录、IP 地址或记忆内容。
 
@@ -9,7 +9,7 @@
 - Windows 钩子使用 `commandWindows` 和 `python`；Linux、macOS 钩子使用 `command` 和 `python3`。
 - 插件数据默认写入 `Path.home()/.codex/plugin-data/mem0-self-hosted`，也可由 `PLUGIN_DATA` 指定；状态文件统一使用 UTF-8、独占文件锁和同目录原子替换。
 - 工作区状态键遵循当前系统的路径大小写语义：Windows 归一化大小写，Linux 和 macOS 保留 POSIX 路径大小写；Windows 盘符与 UNC、Linux `/home`、macOS `/Users` 路径均按字符串形态保护和脱敏。
-- 仓库 CI 使用 Python 3.10 在 Ubuntu、Windows 和 macOS 上分别运行结构校验与完整单元测试。
+- 仓库 CI 使用 Python 3.10 在 Ubuntu、Windows 和 macOS 上分别运行结构校验与完整插件单元测试，并在 Linux 使用 Python 3.12 验证 MCP Adapter 和真实 ASGI Bearer 鉴权链。
 
 ## 工具签名
 

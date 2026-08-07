@@ -2,7 +2,7 @@
 
 ## 凭据
 
-只通过 `MEM0_MCP_TOKEN` 环境变量提供令牌。不要把令牌写入 `.mcp.json`、提交记录、Issue、截图或日志。
+只通过 `MEM0_SELF_HOSTED_API_KEY` 环境变量提供自部署 Mem0 生成且 `purpose=mcp` 的 API Key。MCP 只通过 `/auth/introspect` 校验该 Key，不会把它转发给记忆或管理员接口；后续调用使用服务器挂载的内部服务 Secret。管理员用途 Key 会被 MCP 拒绝，MCP 用途 Key 会被 Mem0 管理员接口拒绝。不要把任何 Key 写入 `.mcp.json`、提交记录、Issue、截图或日志。
 
 ## 钩子审查
 

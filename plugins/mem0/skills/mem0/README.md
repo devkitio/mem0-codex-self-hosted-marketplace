@@ -4,7 +4,7 @@
 
 ## 与本插件运行时的边界
 
-- Codex 插件运行时连接仓库配置的自托管 MCP，只读取 `MEM0_MCP_TOKEN`。
+- Codex 插件运行时连接仓库配置的自托管 MCP，只读取自部署 Mem0 生成且用途为 MCP 的 `MEM0_SELF_HOSTED_API_KEY`。
 - 本目录中的上游示例可能使用 Mem0 Platform、官方云端地址或云端凭据变量；这些示例不参与插件安装、认证或生命周期钩子。
 - 不得根据 SDK 示例修改插件的 `.mcp.json`、固定身份、项目隔离或批量删除安全边界。
 - 自托管插件的日常记忆操作应使用同插件中的 `remember`、`peek`、`tour`、`forget`、`health` 等技能。

@@ -5,7 +5,7 @@
 ## 运行配置
 
 - MCP 地址：`https://mem0-api.jiang.in/mcp`
-- 认证变量：`MEM0_MCP_TOKEN`
+- 认证变量：`MEM0_SELF_HOSTED_API_KEY`
 - Python：3.10 或更高版本；Windows 命令为 `python`，macOS/Linux 命令为 `python3`
 - 项目范围：默认使用当前 Git 仓库根目录名作为 `project_id`；只允许 1～64 位字母、数字、点、下划线或连字符，不符合规则的目录名会生成稳定的 `project-<哈希>` 标识
 
@@ -52,7 +52,8 @@ python3 scripts/mem0_self_hosted.py --current-project --cwd "/你的项目"
 
 ## 安全边界
 
-- 令牌只从进程环境读取，禁止提交到仓库。
+- `MEM0_SELF_HOSTED_API_KEY` 必须是自部署 Mem0 生成的 MCP 用途 Key；MCP 只通过 `/auth/introspect` 校验，不会把它转发给记忆或管理员接口，禁止提交到仓库。
+- 工具调用只使用服务器挂载的内部服务 Secret；客户端无法读取或覆盖该 Secret。
 - 远程 MCP 必须使用 HTTPS，仅回环地址允许 HTTP；认证不会跟随跨源重定向。
 - 钩子标准输入限制为 4 MB，MCP 响应限制为 2 MB。
 - 钩子日志只记录错误类型，不记录令牌和记忆正文。

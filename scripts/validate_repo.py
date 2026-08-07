@@ -12,6 +12,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 PLUGIN = ROOT / "plugins" / "mem0"
+MCP_ADAPTER = ROOT / "services" / "mem0-mcp"
 MEM0_TOOLS = {
     "add_memory",
     "search_memories",
@@ -89,7 +90,7 @@ def main() -> None:
     assert "hooks" not in manifest, "默认 hooks/hooks.json 无需在 manifest 重复声明"
     assert (PLUGIN / "hooks" / "hooks.json").is_file(), "插件缺少默认生命周期钩子文件"
     assert mcp["mcpServers"]["mem0"]["url"] == "https://mem0-api.jiang.in/mcp"
-    assert mcp["mcpServers"]["mem0"]["bearer_token_env_var"] == "MEM0_MCP_TOKEN"
+    assert mcp["mcpServers"]["mem0"]["bearer_token_env_var"] == "MEM0_SELF_HOSTED_API_KEY"
     assert set(mcp["mcpServers"]["mem0"]["disabled_tools"]) == BULK_TOOLS
     assert schema_snapshot["snapshot_version"] == 1
     snapshot_tools = schema_snapshot.get("tools", {})
@@ -193,7 +194,20 @@ def main() -> None:
     workflow = (ROOT / ".github" / "workflows" / "validate.yml").read_text(encoding="utf-8")
     for runner in ("ubuntu-latest", "windows-latest", "macos-latest"):
         assert runner in workflow, f"CI 缺少 {runner} 验证"
+    for name in ("server.py", "test_adapter.py", "Dockerfile", "requirements.lock"):
+        assert (MCP_ADAPTER / name).is_file(), f"仓库缺少 MCP Adapter 文件：{name}"
+    adapter_source = (MCP_ADAPTER / "server.py").read_text(encoding="utf-8")
+    ast.parse(adapter_source)
+    assert '"/auth/introspect"' in adapter_source, "Adapter 未使用 MCP Key 内省接口"
+    assert '"/internal/mcp/search"' in adapter_source, "Adapter 搜索未走内部服务接口"
+    assert '"/auth/me"' not in adapter_source, "Adapter 仍使用管理员身份接口校验 Key"
+    assert '"/search"' not in adapter_source, "Adapter 仍调用公开搜索接口"
+    assert "get_access_token" not in adapter_source, "Adapter 仍可能转发客户端 Key"
+    assert "services/mem0-mcp/requirements.lock" in workflow, "CI 未验证 MCP Adapter"
     runtime_contract = (PLUGIN / "SELF_HOSTED_RUNTIME.md").read_text(encoding="utf-8")
+    assert "/auth/introspect" in runtime_contract and "用途为 MCP" in runtime_contract, (
+        "运行时约定缺少 MCP 专用 Key 边界"
+    )
     for name in MEM0_TOOLS:
         assert f"`{name}(" in runtime_contract, f"运行时约定缺少工具：{name}"
     assert "默认禁用" in runtime_contract and all(name in runtime_contract for name in BULK_TOOLS)

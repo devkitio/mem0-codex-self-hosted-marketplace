@@ -43,6 +43,16 @@ class Mem0SelfHostedTests(unittest.TestCase):
             function(*args)
         return json.loads(output.getvalue())
 
+    def test_连接只读取自部署_Mem0_API_Key(self):
+        with mock.patch.dict(
+            os.environ,
+            {"MEM0_SELF_HOSTED_API_KEY": "m0sk_test-self-hosted-key"},
+        ):
+            url, token = mem0.load_connection()
+
+        self.assertEqual(url, "https://mem0-api.jiang.in/mcp")
+        self.assertEqual(token, "m0sk_test-self-hosted-key")
+
     def test_MCP_响应兼容_JSON_批次和_SSE(self):
         json_batch = json.dumps(
             [

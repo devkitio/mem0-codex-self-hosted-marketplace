@@ -5,9 +5,9 @@ description: 为当前项目完成自托管 Mem0 初始检查、连接验证和�
 
 # 初始化自托管 Mem0
 
-最高优先级：先阅读 `../../SELF_HOSTED_RUNTIME.md`。本插件地址已固定在 `.mcp.json`，认证只使用 `MEM0_MCP_TOKEN`。
+最高优先级：先阅读 `../../SELF_HOSTED_RUNTIME.md`。本插件地址已固定在 `.mcp.json`，认证只使用自部署 Mem0 生成且用途为 MCP 的 `MEM0_SELF_HOSTED_API_KEY`。
 
-1. 确认 `MEM0_MCP_TOKEN` 已设置，但不得显示令牌值。
+1. 确认 `MEM0_SELF_HOSTED_API_KEY` 已设置，但不得显示 API Key 值。
 2. 运行健康检查技能，验证连接以及真实读写和清理。
 3. 解析本技能所在插件根目录。Windows 执行 `python <插件根>/scripts/mem0_self_hosted.py --current-project --cwd <当前工作目录>`，macOS/Linux 执行 `python3 <插件根>/scripts/mem0_self_hosted.py --current-project --cwd <当前工作目录>`；从安全 JSON 输出读取 `project_id` 后搜索已有项目记忆，不得自行推导持久映射或哈希标识。
 4. 检查插件钩子是否已在 Codex `/hooks` 中审核并信任；已信任时，新的启动任务会自动导入不超过 100 KB 的 `CLAUDE.md`、`AGENTS.md`、`.cursorrules`、`.windsurfrules` 和 `mem0.md`，并通过 SHA-256 跳过未变化内容。文件变得过大时不会上传，并会按远端精确标记清理旧导入。
