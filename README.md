@@ -194,9 +194,9 @@ python3 plugins/mem0/scripts/mem0_self_hosted.py --current-project --cwd "/你�
 
 `switch-project` 技能会把工作区到 `project_id` 的映射保存在插件数据目录中，因此切换结果可跨任务生效且不会修改仓库；映射值必须符合生产 MCP 的 1～64 位字符规则，也可以随时恢复为运行时自动识别。
 
-自托管服务现提供 10 个工具：旧 6 个工具保持兼容，并增加 `get_memory_history`、`list_entities`、`delete_all_memories` 和 `delete_entities`。同时支持受限 metadata/filters、分页、过期时间和真实 rerank。项目与运行实体从受管记忆推导，不等同于官方云端实体目录；搜索会分别检索项目与全局范围后按分数合并。
+自托管服务现提供 10 个工具：旧 6 个工具保持兼容，并增加 `get_memory_history`、`list_entities`、`delete_all_memories` 和 `delete_entities`。同时支持受限 metadata/filters、分页、过期时间和真实 rerank。项目与运行实体从受管记忆推导，不等同于官方云端实体目录；搜索通过一次受限查询同时覆盖当前项目和全局范围，再按分数返回结果。
 
-两个批量工具在插件配置中默认禁用。需要使用时必须由用户明确启用，并遵循“预览 → 明确确认 → 5 分钟 HMAC 令牌执行”的流程；不支持用户级或全局清空。
+两个批量工具在插件配置中默认禁用。需要使用时必须由用户明确启用，并遵循“预览 → 明确确认 → 5 分钟 HMAC 令牌执行”的流程；服务端持久化删除进度，同一令牌只恢复未完成操作或返回既有结果，不支持用户级或全局清空。
 
 ## 更新
 

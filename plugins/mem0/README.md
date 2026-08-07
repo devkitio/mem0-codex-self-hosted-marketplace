@@ -15,7 +15,7 @@
 
 基础工具为 `add_memory`、`search_memories`、`get_memories`、`get_memory`、`update_memory` 和 `delete_memory`。扩展工具为 `get_memory_history`、`list_entities`、`delete_all_memories` 和 `delete_entities`。
 
-服务端支持受限 `messages`、`metadata`、`filters`、`run_id`、过期时间、rerank、分页和历史记录。`list_entities` 只返回从受管记忆推导出的项目与运行，不是官方云端实体目录。两个批量删除工具采用“预览 → 用户确认 → 5 分钟 HMAC 令牌执行”，并在 `.mcp.json` 中默认禁用。
+服务端支持受限 `messages`、`metadata`、`filters`、`run_id`、过期时间、rerank、分页和历史记录。`list_entities(show_expired=false)` 只返回从受管记忆推导出的项目与运行，不是官方云端实体目录。两个批量删除工具采用“预览 → 用户确认 → 5 分钟 HMAC 令牌执行”，持久化执行进度并对同一令牌幂等收敛，同时在 `.mcp.json` 中默认禁用。
 
 ## 生命周期钩子
 
@@ -60,6 +60,6 @@ python3 scripts/mem0_self_hosted.py --current-project --cwd "/你的项目"
 - 文件历史检索只发送项目内相对路径，不发送文件内容；`.env` 和项目外文件会被跳过。
 - 记忆按 `project_id` 隔离；当前用户指令始终高于历史记忆。
 - 服务端固定用户与所有者字段；调用者不能通过 metadata 或 filters 覆盖身份和项目边界。
-- 批量删除只允许项目或运行范围，禁止全局用户清空；令牌过期、篡改和重放都会失败。
+- 批量删除只允许项目或运行范围，禁止全局用户清空；令牌过期、篡改或范围变化会失败，同一有效令牌只恢复未完成操作或返回既有结果。
 - SDK 参考资料可能包含上游云端示例，但不参与插件运行时请求。
 - `mcp-schema.snapshot.json` 只保存工具契约元数据；`--check` 会与生产 `tools/list` 比较，不保存令牌或记忆正文。

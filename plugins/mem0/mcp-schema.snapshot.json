@@ -35,7 +35,7 @@
       },
       "defaults": {"confirmation_token": null, "run_id": null},
       "enums": {},
-      "annotations": {"readOnlyHint": false, "destructiveHint": true, "idempotentHint": false, "openWorldHint": false}
+      "annotations": {"readOnlyHint": false, "destructiveHint": true, "idempotentHint": true, "openWorldHint": false}
     },
     "delete_entities": {
       "properties": ["confirmation_token", "entity_id", "entity_type", "project_id"],
@@ -48,7 +48,7 @@
       },
       "defaults": {"confirmation_token": null, "project_id": null},
       "enums": {"entity_type": ["project", "run"]},
-      "annotations": {"readOnlyHint": false, "destructiveHint": true, "idempotentHint": false, "openWorldHint": false}
+      "annotations": {"readOnlyHint": false, "destructiveHint": true, "idempotentHint": true, "openWorldHint": false}
     },
     "delete_memory": {
       "properties": ["memory_id", "project_id"],
@@ -104,10 +104,10 @@
       "annotations": {"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false}
     },
     "list_entities": {
-      "properties": ["entity_type", "project_id"],
+      "properties": ["entity_type", "project_id", "show_expired"],
       "required": [],
-      "types": {"entity_type": ["null", "string"], "project_id": ["null", "string"]},
-      "defaults": {"entity_type": null, "project_id": null},
+      "types": {"entity_type": ["null", "string"], "project_id": ["null", "string"], "show_expired": ["boolean"]},
+      "defaults": {"entity_type": null, "project_id": null, "show_expired": false},
       "enums": {"entity_type": ["project", "run"]},
       "annotations": {"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false}
     },

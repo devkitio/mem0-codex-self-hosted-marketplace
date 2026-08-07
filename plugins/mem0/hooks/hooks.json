@@ -33,7 +33,7 @@
             "type": "command",
             "command": "python3 \"${PLUGIN_ROOT}/scripts/mem0_self_hosted.py\"",
             "commandWindows": "python \"${PLUGIN_ROOT}\\scripts\\mem0_self_hosted.py\"",
-            "timeout": 8,
+            "timeout": 20,
             "statusMessage": "正在查找文件相关历史",
             "additionalContextLimit": 1500
           }
@@ -48,7 +48,7 @@
             "type": "command",
             "command": "python3 \"${PLUGIN_ROOT}/scripts/mem0_self_hosted.py\"",
             "commandWindows": "python \"${PLUGIN_ROOT}\\scripts\\mem0_self_hosted.py\"",
-            "timeout": 60,
+            "timeout": 90,
             "statusMessage": "正在导入项目规则并加载自托管 Mem0 上下文",
             "additionalContextLimit": 1500
           }
@@ -62,7 +62,7 @@
             "type": "command",
             "command": "python3 \"${PLUGIN_ROOT}/scripts/mem0_self_hosted.py\"",
             "commandWindows": "python \"${PLUGIN_ROOT}\\scripts\\mem0_self_hosted.py\"",
-            "timeout": 20,
+            "timeout": 25,
             "statusMessage": "正在检索自托管 Mem0",
             "additionalContextLimit": 1500
           }
@@ -89,7 +89,7 @@
             "type": "command",
             "command": "python3 \"${PLUGIN_ROOT}/scripts/mem0_self_hosted.py\"",
             "commandWindows": "python \"${PLUGIN_ROOT}\\scripts\\mem0_self_hosted.py\"",
-            "timeout": 12,
+            "timeout": 20,
             "statusMessage": "正在检查历史错误解决记录",
             "additionalContextLimit": 1500
           }
@@ -103,7 +103,7 @@
             "type": "command",
             "command": "python3 \"${PLUGIN_ROOT}/scripts/mem0_self_hosted.py\"",
             "commandWindows": "python \"${PLUGIN_ROOT}\\scripts\\mem0_self_hosted.py\"",
-            "timeout": 30,
+            "timeout": 60,
             "statusMessage": "正在保存自托管 Mem0 会话总结"
           }
         ]
@@ -117,7 +117,7 @@
             "type": "command",
             "command": "python3 \"${PLUGIN_ROOT}/scripts/mem0_self_hosted.py\"",
             "commandWindows": "python \"${PLUGIN_ROOT}\\scripts\\mem0_self_hosted.py\"",
-            "timeout": 30,
+            "timeout": 60,
             "statusMessage": "正在保存压缩前的 Mem0 总结"
           }
         ]

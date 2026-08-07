@@ -106,6 +106,8 @@ def main() -> None:
         assert annotations["readOnlyHint"] is (name in READ_ONLY_TOOLS)
         assert annotations["destructiveHint"] is (name in DESTRUCTIVE_TOOLS)
     assert snapshot_tools["list_entities"]["enums"]["entity_type"] == ["project", "run"]
+    assert "show_expired" in snapshot_tools["list_entities"]["properties"]
+    assert snapshot_tools["list_entities"]["defaults"]["show_expired"] is False
     assert snapshot_tools["delete_entities"]["enums"]["entity_type"] == ["project", "run"]
     assert snapshot_tools["get_memories"]["enums"]["sort_by"] == [
         "created_at",
@@ -119,6 +121,9 @@ def main() -> None:
         )
         assert "confirmation_token" not in snapshot_tools[name]["required"], (
             f"{name} 必须允许省略确认令牌以生成预览"
+        )
+        assert snapshot_tools[name]["annotations"]["idempotentHint"] is True, (
+            f"{name} 必须声明持久化幂等语义"
         )
     assert set(hooks["hooks"]) == OFFICIAL_CODEX_HOOK_EVENTS
     serialized_hooks = json.dumps(hooks, ensure_ascii=False)
@@ -167,6 +172,11 @@ def main() -> None:
     skill_dirs = [path for path in (PLUGIN / "skills").iterdir() if path.is_dir()]
     assert {path.name for path in skill_dirs} == OFFICIAL_CODEX_SKILLS, "技能集合必须对齐官方 Codex 插件"
     assert all((path / "SKILL.md").is_file() for path in skill_dirs), "技能缺少 SKILL.md"
+    skill_text = "\n".join(
+        (path / "SKILL.md").read_text(encoding="utf-8")
+        for path in skill_dirs
+    )
+    assert "page_size=200" not in skill_text, "技能仍请求超过服务端上限的单页大小"
     health_skill = (PLUGIN / "skills" / "health" / "SKILL.md").read_text(encoding="utf-8")
     assert "../../scripts/mem0_self_hosted.py" in health_skill, "健康检查脚本路径无效"
     switch_skill = (PLUGIN / "skills" / "switch-project" / "SKILL.md").read_text(

@@ -2,7 +2,7 @@
 
 本插件运行时只调用 `https://mem0-api.jiang.in/mcp`，并且只使用 `MEM0_MCP_TOKEN` 认证。不得请求 `api.mem0.ai`、`mcp.mem0.ai`，也不得要求 `MEM0_API_KEY`。
 
-钩子客户端兼容 Streamable HTTP 的 `application/json` 与 `text/event-stream` 响应，并按 JSON-RPC 请求 ID 忽略 SSE 中先到达的通知或其他消息。远程 MCP 必须使用 HTTPS，仅回环地址允许 HTTP；认证只跟随同源重定向。单次 MCP 响应最多读取 2 MB，钩子标准输入最多读取 4 MB，服务端错误正文不得透传。钩子兜底日志只记录异常类型或脱敏后的本地诊断，不记录令牌、用户目录、IP 地址或记忆内容。
+钩子客户端兼容 Streamable HTTP 的 `application/json` 与 `text/event-stream` 响应，并按 JSON-RPC 请求 ID 忽略 SSE 中先到达的通知或其他消息。远程 MCP 必须使用 HTTPS，仅回环地址允许 HTTP；认证只跟随同源重定向。只读工具使用 15 秒请求超时，写工具使用 50 秒请求超时，外层钩子超时必须更长。单次 MCP 响应最多读取 2 MB，钩子标准输入最多读取 4 MB，服务端错误正文不得透传。钩子兜底日志只记录异常类型或脱敏后的本地诊断，不记录令牌、用户目录、IP 地址或记忆内容。
 
 ## 系统兼容性
 
@@ -20,11 +20,11 @@
 - `update_memory(memory_id, project_id?, text?, metadata?, expiration_date?)`
 - `delete_memory(memory_id, project_id?)`
 - `get_memory_history(memory_id, project_id?)`
-- `list_entities(entity_type?, project_id?)`
+- `list_entities(entity_type?, project_id?, show_expired?)`
 - `delete_all_memories(project_id, run_id?, confirmation_token?)`
 - `delete_entities(entity_type, entity_id, project_id?, confirmation_token?)`
 
-`text` 与 `messages` 必须且只能提供一个。`get_memories.limit` 仅用于兼容旧调用；新调用使用 `page/page_size`，单页最多 200 条，并处理结构化返回中的 `results/count/next/previous/partial`。出现 `partial=true` 时必须明确说明结果可能不完整。
+`text` 与 `messages` 必须且只能提供一个。`get_memories.limit` 仅用于兼容旧调用；新调用使用 `page/page_size`，单页最多 20 条，并处理结构化返回中的 `results/count/next/previous/partial`。出现 `partial=true` 时必须明确说明结果可能不完整。`list_entities` 默认排除过期记忆，只有显式传入 `show_expired=true` 才会计入。
 
 ## 身份与项目边界
 
@@ -67,6 +67,6 @@
 - `update_memory` 与 `delete_memory` 继续要求用户确认具体目标。
 - `delete_all_memories` 与 `delete_entities` 在 `.mcp.json` 中默认禁用。只有用户明确启用并要求按项目或运行删除时才可使用。
 - 两个批量工具必须先省略 `confirmation_token` 获取预览，再向用户展示范围、数量和截止时间；取得明确确认后，原样提交 5 分钟 HMAC 令牌执行。
-- 令牌过期、篡改、范围变化或重复使用时不得重试执行，应重新预览并再次确认。禁止用户级或全局清空。
+- 令牌过期、篡改或范围变化时不得执行，应重新预览并再次确认。同一有效令牌的重复请求只接管未完成操作或返回持久化结果，不重复删除已经完成的目标；客户端仍不得在结果明确成功后主动重放。禁止用户级或全局清空。
 
 自动导入继续使用 `[mem0:auto-import]` 正文标记，每个候选文件最多读取 100 KB；超限文件不上传，并按与删除文件相同的精确标记流程清理旧导入。检索结果必须同时精确匹配项目、来源文件、内容哈希和导入格式，不同来源文件或项目不得仅因内容哈希相同而互相跳过。短 Markdown 章节必须合并到受限分块中，验证时要求 `分块：i/n` 完整覆盖，重复序号不能代替缺失分块。新增分块前必须持久化 `pending` 状态；项目资料更新时，待处理状态必须保留上一份有效版本的哈希、格式和必要的记忆 ID，新分块写入并验证成功前不得删除旧版本。旧分块清理进度必须逐 ID 持久化；本地状态 ID 只用于恢复进度，只有精确搜索返回且正文标记完整匹配的 ID 才允许调用删除。搜索未返回或标记已变化的状态 ID 不调用删除，并从本地清理队列安全收敛。旧分块清理失败时允许新旧版本暂时共存，但不得重复写入新分块；后续启动必须继续清理并在全部成功后提交新状态。项目资料被清空、删除或变得过大时，只删除精确正文标记确认由插件生成的旧分块。所有项目范围共用状态文件时，写入必须在共享锁内重新读取并仅合并当前范围，禁止覆盖其他项目状态；文件与远端分块均未变化时不得重写状态文件。

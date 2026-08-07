@@ -137,6 +137,18 @@ class Mem0SelfHostedTests(unittest.TestCase):
 
         self.assertNotIn("sentinel-secret", str(raised.exception))
 
+    def test_MCP_读写请求使用不同超时(self):
+        with mock.patch.object(
+            mem0,
+            "mcp_request",
+            return_value={"isError": False},
+        ) as request:
+            mem0.call_tool("search_memories", {"query": "测试"})
+            self.assertEqual(request.call_args.args[2], mem0.MCP_REQUEST_TIMEOUT)
+
+            mem0.call_tool("add_memory", {"text": "测试"})
+            self.assertEqual(request.call_args.args[2], mem0.MCP_MUTATION_TIMEOUT)
+
     def test_MCP_地址和重定向不会泄漏令牌(self):
         for url in (
             "http://10.20.30.40/mcp",

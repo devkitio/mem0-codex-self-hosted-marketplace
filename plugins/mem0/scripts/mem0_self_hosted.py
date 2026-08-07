@@ -30,7 +30,8 @@ PLUGIN_DATA = Path(
 )
 LOG_PATH = PLUGIN_DATA / "mem0_self_hosted.log"
 PROTOCOL_VERSION = "2025-03-26"
-MCP_REQUEST_TIMEOUT = 6
+MCP_REQUEST_TIMEOUT = 15
+MCP_MUTATION_TIMEOUT = 50
 MAX_MCP_RESPONSE_BYTES = 2_000_000
 MAX_HOOK_INPUT_BYTES = 4_000_000
 MAX_MEMORY_TEXT = 50_000
@@ -72,6 +73,13 @@ MEM0_TOOL_NAMES = {
     "get_memory_history",
     "list_entities",
     "update_memory",
+}
+MUTATING_TOOLS = {
+    "add_memory",
+    "update_memory",
+    "delete_memory",
+    "delete_all_memories",
+    "delete_entities",
 }
 FILE_PATTERN = re.compile(
     r"[A-Za-z0-9_./\\-]+\.(?:py|ts|tsx|js|jsx|rs|go|rb|java|sh|ps1|yaml|yml|json|toml|md|sql|css|html)"
@@ -262,9 +270,12 @@ class SameOriginRedirectHandler(urllib.request.HTTPRedirectHandler):
         return redirected
 
 
-def open_mcp_request(request: urllib.request.Request) -> Any:
+def open_mcp_request(
+    request: urllib.request.Request,
+    timeout_seconds: float = MCP_REQUEST_TIMEOUT,
+) -> Any:
     opener = urllib.request.build_opener(SameOriginRedirectHandler())
-    return opener.open(request, timeout=MCP_REQUEST_TIMEOUT)
+    return opener.open(request, timeout=timeout_seconds)
 
 
 def load_connection() -> tuple[str, str]:
@@ -308,7 +319,11 @@ def parse_mcp_response(body: str, content_type: str, request_id: int = 1) -> dic
     raise RuntimeError("MCP 响应缺少匹配当前请求的结果")
 
 
-def mcp_request(method: str, params: dict[str, Any]) -> dict[str, Any]:
+def mcp_request(
+    method: str,
+    params: dict[str, Any],
+    timeout_seconds: float = MCP_REQUEST_TIMEOUT,
+) -> dict[str, Any]:
     """使用无状态 Streamable HTTP 调用自托管 MCP。"""
     url, token = load_connection()
     payload = json.dumps(
@@ -327,7 +342,7 @@ def mcp_request(method: str, params: dict[str, Any]) -> dict[str, Any]:
         },
     )
     request.add_unredirected_header("Authorization", f"Bearer {token}")
-    with open_mcp_request(request) as response:
+    with open_mcp_request(request, timeout_seconds) as response:
         raw = response.read(MAX_MCP_RESPONSE_BYTES + 1)
         if len(raw) > MAX_MCP_RESPONSE_BYTES:
             raise RuntimeError("MCP 响应超过大小限制")
@@ -341,7 +356,12 @@ def mcp_request(method: str, params: dict[str, Any]) -> dict[str, Any]:
 
 
 def call_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-    result = mcp_request("tools/call", {"name": name, "arguments": arguments})
+    timeout_seconds = MCP_MUTATION_TIMEOUT if name in MUTATING_TOOLS else MCP_REQUEST_TIMEOUT
+    result = mcp_request(
+        "tools/call",
+        {"name": name, "arguments": arguments},
+        timeout_seconds,
+    )
     if result.get("isError"):
         raise RuntimeError(f"MCP 工具 {name} 返回错误")
     return result
