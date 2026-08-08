@@ -76,6 +76,35 @@ PROJECT_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 RESERVED_METADATA = {"user_id", "agent_id", "app_id", "mcp_owner", "scope", "project_id", "source", "run_id"}
+MEMORY_RESPONSE_FIELDS = {
+    "id",
+    "memory",
+    "data",
+    "user_id",
+    "agent_id",
+    "app_id",
+    "run_id",
+    "metadata",
+    "categories",
+    "hash",
+    "score",
+    "score_details",
+    "created_at",
+    "updated_at",
+    "expiration_date",
+    "event",
+}
+CLEAN_MEMORY_FIELDS = {
+    "id",
+    "memory",
+    "user_id",
+    "run_id",
+    "created_at",
+    "updated_at",
+    "expiration_date",
+    "score",
+    "score_details",
+}
 FILTER_FIELDS = {"metadata", "run_id", "created_at", "updated_at", "expiration_date"}
 FILTER_LOGICAL = {"AND", "OR", "NOT"}
 FILTER_OPERATORS = {"eq", "ne", "in", "nin", "gt", "gte", "lt", "lte", "contains", "icontains"}
@@ -209,12 +238,11 @@ def _expiration(value: str | None, *, allow_clear: bool = False) -> str | None:
     if not value or len(value) > 64:
         raise ValueError("expiration_date 格式无效")
     try:
-        if "T" in value or " " in value:
-            datetime.fromisoformat(value.replace("Z", "+00:00"))
-        else:
-            date.fromisoformat(value)
+        parsed = date.fromisoformat(value)
     except ValueError as exc:
-        raise ValueError("expiration_date 必须为 ISO 8601 日期或时间") from exc
+        raise ValueError("expiration_date 必须为 YYYY-MM-DD 日期") from exc
+    if parsed.isoformat() != value:
+        raise ValueError("expiration_date 必须为 YYYY-MM-DD 日期")
     return value
 
 
@@ -243,9 +271,20 @@ def _messages(text: str | None, messages: list[dict[str, str]] | None) -> list[d
 
 def _json_bytes(value: Any) -> int:
     try:
-        return len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+        return len(
+            json.dumps(
+                value,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+        )
     except (TypeError, ValueError) as exc:
         raise ValueError("参数必须是 JSON 可序列化值") from exc
+
+
+def _reject_json_constant(_value: str) -> None:
+    raise ValueError("不允许非标准 JSON 数值")
 
 
 def _metadata(value: dict[str, Any] | None) -> dict[str, Any]:
@@ -284,48 +323,45 @@ def _metadata(value: dict[str, Any] | None) -> dict[str, Any]:
             raise ValueError("metadata 包含不支持的值类型")
 
     walk(value, 0)
-    return json.loads(json.dumps(value, ensure_ascii=False))
+    return json.loads(json.dumps(value, ensure_ascii=False, allow_nan=False))
 
 
-def _rows(data: Any) -> list[dict[str, Any]]:
-    if isinstance(data, list):
-        return [item for item in data if isinstance(item, dict)]
-    if isinstance(data, dict):
-        for key in ("results", "memories"):
-            value = data.get(key)
-            if isinstance(value, list):
-                return [item for item in value if isinstance(item, dict)]
-    return []
+def _result_rows(data: Any, operation: str) -> list[dict[str, Any]]:
+    if (
+        not isinstance(data, dict)
+        or not isinstance(data.get("results"), list)
+        or any(not isinstance(item, dict) for item in data["results"])
+    ):
+        raise RuntimeError(f"Mem0 {operation}返回无效响应")
+    return data["results"]
 
 
 def _item_metadata(item: dict[str, Any]) -> dict[str, Any]:
     value = item.get("metadata")
-    if isinstance(value, dict):
-        return value
-    reserved = {
-        "id",
-        "memory",
-        "data",
-        "user_id",
-        "agent_id",
-        "run_id",
-        "hash",
-        "score",
-        "score_details",
-        "created_at",
-        "updated_at",
-        "expiration_date",
-    }
-    return {key: value for key, value in item.items() if key not in reserved}
+    metadata = dict(value) if isinstance(value, dict) else {}
+    for key, flattened_value in item.items():
+        if key in RESERVED_METADATA and key in metadata and metadata[key] != flattened_value:
+            raise RuntimeError("Mem0 返回冲突的保留 metadata")
+        if key not in MEMORY_RESPONSE_FIELDS:
+            metadata.setdefault(key, flattened_value)
+    return metadata
+
+
+def _managed(item: dict[str, Any]) -> bool:
+    return (
+        item.get("user_id") in (None, DEFAULT_USER_ID)
+        and _item_metadata(item).get("mcp_owner") == OWNER
+    )
 
 
 def _visible(item: dict[str, Any], project_id: str | None, *, include_global: bool) -> bool:
-    if item.get("user_id") not in (None, DEFAULT_USER_ID):
+    if not _managed(item):
         return False
     metadata = _item_metadata(item)
-    if metadata.get("mcp_owner") != OWNER:
-        return False
     item_project = metadata.get("project_id")
+    expected_scope = "project" if item_project not in (None, "") else "global"
+    if metadata.get("scope") != expected_scope:
+        return False
     if project_id is None:
         return item_project in (None, "")
     if include_global:
@@ -334,33 +370,31 @@ def _visible(item: dict[str, Any], project_id: str | None, *, include_global: bo
 
 
 def _clean(item: dict[str, Any]) -> dict[str, Any]:
-    allowed = {
-        "id",
-        "memory",
-        "user_id",
-        "run_id",
-        "metadata",
-        "created_at",
-        "updated_at",
-        "expiration_date",
-        "score",
-        "score_details",
-    }
-    return {key: value for key, value in item.items() if key in allowed}
+    cleaned = {key: value for key, value in item.items() if key in CLEAN_MEMORY_FIELDS}
+    metadata = _item_metadata(item)
+    if metadata or isinstance(item.get("metadata"), dict):
+        cleaned["metadata"] = metadata
+    return cleaned
 
 
 def _validate_filter_condition(condition: Any) -> None:
+    if condition is None:
+        raise ValueError("过滤值不能为 null")
     if isinstance(condition, dict):
         if len(condition) != 1:
             raise ValueError("过滤比较只能包含一个操作符")
         operator, operand = next(iter(condition.items()))
         if operator not in FILTER_OPERATORS:
             raise ValueError(f"不允许的过滤操作符: {operator}")
+        if operand is None:
+            raise ValueError("过滤比较值不能为 null")
+        if operator in {"gt", "gte", "lt", "lte"} and isinstance(operand, bool):
+            raise ValueError("范围过滤值不能是布尔值")
         if operator in {"in", "nin"}:
             if not isinstance(operand, list) or not operand or len(operand) > 20:
                 raise ValueError("in/nin 过滤必须包含 1-20 个值")
             for value in operand:
-                if isinstance(value, (dict, list)) or (isinstance(value, str) and len(value) > 512):
+                if value is None or isinstance(value, (dict, list)) or (isinstance(value, str) and len(value) > 512):
                     raise ValueError("in/nin 过滤值无效")
         elif isinstance(operand, (dict, list)) or (isinstance(operand, str) and len(operand) > 512):
             raise ValueError("过滤比较值必须是长度受限的标量")
@@ -410,7 +444,7 @@ def _filters(value: dict[str, Any] | None) -> dict[str, Any] | None:
                 _validate_filter_condition(condition)
 
     walk(value, 0)
-    return json.loads(json.dumps(value, ensure_ascii=False))
+    return json.loads(json.dumps(value, ensure_ascii=False, allow_nan=False))
 
 
 _FILTER_MISSING = object()
@@ -499,6 +533,51 @@ def _matches_filter(item: dict[str, Any], value: dict[str, Any]) -> bool:
     return _evaluate_filter(item, value) is True
 
 
+def _memory_rows(
+    data: Any,
+    operation: str,
+    *,
+    project_id: str | None,
+    include_global: bool = False,
+    all_projects: bool = False,
+    run_id: str | None = None,
+    filters: dict[str, Any] | None = None,
+    maximum: int | None = None,
+) -> list[dict[str, Any]]:
+    rows = _result_rows(data, operation)
+    if maximum is not None and len(rows) > maximum:
+        raise RuntimeError(f"Mem0 {operation}返回无效响应")
+    seen: set[str] = set()
+    for item in rows:
+        memory_id = item.get("id")
+        try:
+            normalized_id = str(uuid.UUID(memory_id))
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise RuntimeError(f"Mem0 {operation}返回无效响应") from exc
+        if normalized_id != memory_id or memory_id in seen:
+            raise RuntimeError(f"Mem0 {operation}返回无效响应")
+        seen.add(memory_id)
+        in_scope = _managed(item) if all_projects else _visible(
+            item,
+            project_id,
+            include_global=include_global,
+        )
+        if (
+            not in_scope
+            or (run_id is not None and item.get("run_id") != run_id)
+            or (filters is not None and not _matches_filter(item, filters))
+        ):
+            raise RuntimeError(f"Mem0 {operation}返回越界结果")
+    return rows
+
+
+def _response_count(data: dict[str, Any], operation: str) -> int:
+    count = data.get("count")
+    if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+        raise RuntimeError(f"Mem0 {operation}返回无效响应")
+    return count
+
+
 async def _request(
     method: str,
     path: str,
@@ -572,8 +651,8 @@ async def _request(
     if status_code == 204 or not body:
         return None
     try:
-        return json.loads(body)
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        return json.loads(body, parse_constant=_reject_json_constant)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
         raise RuntimeError("Mem0 上游返回无效 JSON") from exc
 
 
@@ -583,9 +662,10 @@ async def _internal_memory_action(
     project_id: str | None,
     **changes: Any,
 ) -> dict[str, Any]:
+    normalized_id = _memory_id(memory_id)
     payload = {
         "action": action,
-        "memory_id": _memory_id(memory_id),
+        "memory_id": normalized_id,
         "project_id": project_id,
         **changes,
     }
@@ -598,15 +678,27 @@ async def _internal_memory_action(
     )
     if not isinstance(data, dict):
         raise RuntimeError("Mem0 内部记忆操作返回无效响应")
+    if action in {"get", "update"}:
+        memory = data.get("memory")
+        if (
+            not isinstance(memory, dict)
+            or memory.get("id") != normalized_id
+            or not _visible(memory, project_id, include_global=False)
+        ):
+            raise RuntimeError("Mem0 内部记忆操作返回无效响应")
+    elif action == "delete":
+        if data.get("deleted") is not True or data.get("memory_id") != normalized_id:
+            raise RuntimeError("Mem0 内部删除返回无效响应")
+    else:
+        rows = _result_rows(data, "内部历史")
+        if any(item.get("memory_id") not in (None, normalized_id) for item in rows):
+            raise RuntimeError("Mem0 内部历史返回无效响应")
     return data
 
 
 async def _owned(memory_id: str, project_id: str | None) -> dict[str, Any]:
     data = await _internal_memory_action("get", memory_id, project_id)
-    item = data.get("memory")
-    if not isinstance(item, dict) or not _visible(item, project_id, include_global=False):
-        raise PermissionError("记忆不属于该 Adapter，或不在请求的精确项目范围内")
-    return item
+    return data["memory"]
 
 
 async def _internal_query(
@@ -623,6 +715,8 @@ async def _internal_query(
     sort_order: str = "desc",
     cutoff: str | None = None,
 ) -> dict[str, Any]:
+    if all_projects and project_id is not None:
+        raise RuntimeError("Mem0 内部查询范围无效")
     payload = {
         "project_id": project_id,
         "include_global": include_global,
@@ -646,6 +740,40 @@ async def _internal_query(
     )
     if not isinstance(data, dict):
         raise RuntimeError("Mem0 内部查询返回无效响应")
+    rows = _memory_rows(
+        data,
+        "内部查询",
+        project_id=project_id,
+        include_global=include_global,
+        all_projects=all_projects,
+        run_id=run_id,
+        filters=filters,
+        maximum=page_size,
+    )
+    count = _response_count(data, "内部查询")
+    partial = data.get("partial")
+    result_hash = data.get("result_hash")
+    scanned = data.get("scanned")
+    expected_next = page + 1 if page * page_size < count else None
+    expected_previous = page - 1 if page > 1 and (page - 1) * page_size < count else None
+    next_page = data.get("next")
+    previous_page = data.get("previous")
+    if (
+        count < len(rows)
+        or count > SCAN_LIMIT
+        or not isinstance(partial, bool)
+        or not isinstance(result_hash, str)
+        or not HASH_RE.fullmatch(result_hash)
+        or next_page is not None
+        and (isinstance(next_page, bool) or not isinstance(next_page, int))
+        or previous_page is not None
+        and (isinstance(previous_page, bool) or not isinstance(previous_page, int))
+        or next_page != expected_next
+        or previous_page != expected_previous
+        or (partial and scanned != SCAN_LIMIT)
+        or (not partial and scanned is not None)
+    ):
+        raise RuntimeError("Mem0 内部查询返回无效响应")
     return data
 
 
@@ -668,6 +796,45 @@ async def _internal_entities(
         timeout_seconds=READ_TIMEOUT,
     )
     if not isinstance(data, dict):
+        raise RuntimeError("Mem0 内部实体查询返回无效响应")
+    rows = _result_rows(data, "内部实体查询")
+    count = _response_count(data, "内部实体查询")
+    partial = data.get("partial")
+    seen: set[tuple[str, str, str | None]] = set()
+    for item in rows:
+        item_type = item.get("type")
+        item_id = item.get("id")
+        item_project = item.get("project_id")
+        memory_count = item.get("memory_count")
+        if item_type not in {"project", "run"} or (
+            entity_type is not None and item_type != entity_type
+        ):
+            raise RuntimeError("Mem0 内部实体查询返回无效响应")
+        try:
+            if item_type == "project":
+                if _project(item_id) is None or item_project not in (None, ""):
+                    raise ValueError
+                normalized_project = item_id
+            else:
+                if _entity_id(item_id, "entity_id") is None:
+                    raise ValueError
+                normalized_project = _project(item_project)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("Mem0 内部实体查询返回无效响应") from exc
+        if project_id is not None and normalized_project != project_id:
+            raise RuntimeError("Mem0 内部实体查询返回越界结果")
+        identity = (item_type, item_id, normalized_project)
+        if (
+            identity in seen
+            or isinstance(memory_count, bool)
+            or not isinstance(memory_count, int)
+            or memory_count < 1
+            or item.get("updated_at") is not None
+            and not isinstance(item.get("updated_at"), str)
+        ):
+            raise RuntimeError("Mem0 内部实体查询返回无效响应")
+        seen.add(identity)
+    if count != len(rows) or count > SCAN_LIMIT or not isinstance(partial, bool):
         raise RuntimeError("Mem0 内部实体查询返回无效响应")
     return data
 
@@ -742,12 +909,14 @@ async def _bulk_delete(
         )
         if preview.get("partial"):
             raise ValueError("删除范围达到扫描上限，无法生成安全确认令牌")
-        count = int(preview.get("count", 0))
+        count = preview.get("count", 0)
+        if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+            raise RuntimeError("Mem0 内部查询返回无效预览数量")
         result_hash = str(preview.get("result_hash", ""))
         if not HASH_RE.fullmatch(result_hash):
             raise RuntimeError("Mem0 内部查询缺少有效预览摘要")
         samples = []
-        for item in _rows(preview)[:20]:
+        for item in preview["results"][:20]:
             memory = item.get("memory")
             samples.append(
                 {
@@ -774,7 +943,15 @@ async def _bulk_delete(
     payload = _verify_confirmation(confirmation_token, scope)
     result_hash = payload.get("result_hash")
     cutoff = payload.get("cutoff")
-    if not isinstance(result_hash, str) or not HASH_RE.fullmatch(result_hash) or not isinstance(cutoff, str):
+    expected_count = payload.get("count")
+    if (
+        not isinstance(result_hash, str)
+        or not HASH_RE.fullmatch(result_hash)
+        or not isinstance(cutoff, str)
+        or isinstance(expected_count, bool)
+        or not isinstance(expected_count, int)
+        or expected_count < 1
+    ):
         raise ValueError("确认令牌缺少删除预览信息")
     result = await _request(
         "POST",
@@ -784,22 +961,41 @@ async def _bulk_delete(
             "run_id": run_id,
             "cutoff": cutoff,
             "expected_hash": result_hash,
-            "expected_count": int(payload.get("count", -1)),
+            "expected_count": expected_count,
             "operation_id": payload["jti"],
             "operation_expires_at": int(payload["exp"]),
         },
         internal=True,
         timeout_seconds=TIMEOUT,
     )
-    failed_ids = result.get("failed_ids", []) if isinstance(result, dict) else []
+    if not isinstance(result, dict):
+        raise RuntimeError("Mem0 内部删除返回无效响应")
+    status = result.get("status")
+    deleted = result.get("deleted")
+    failed_ids = result.get("failed_ids")
+    replayed = result.get("replayed")
+    if (
+        status not in {"completed", "partial"}
+        or isinstance(deleted, bool)
+        or not isinstance(deleted, int)
+        or deleted < 0
+        or not isinstance(failed_ids, list)
+        or any(not isinstance(memory_id, str) or not memory_id for memory_id in failed_ids)
+        or len(set(failed_ids)) != len(failed_ids)
+        or not isinstance(replayed, bool)
+        or result.get("result_hash") != result_hash
+        or deleted + len(failed_ids) != expected_count
+        or (status == "completed") == bool(failed_ids)
+    ):
+        raise RuntimeError("Mem0 内部删除返回无效响应")
     return {
         "ok": not failed_ids,
         "phase": "partial" if failed_ids else "executed",
         "scope": scope,
-        "deleted": result.get("deleted", 0) if isinstance(result, dict) else 0,
+        "deleted": deleted,
         "failed_ids": failed_ids,
         "operation_id": payload["jti"],
-        "replayed": bool(result.get("replayed")) if isinstance(result, dict) else False,
+        "replayed": replayed,
     }
 
 
@@ -815,7 +1011,7 @@ async def add_memory(
     run_id: str | None = None,
     expiration_date: str | None = None,
 ) -> dict[str, Any]:
-    """保存长期记忆。text 与 messages 二选一；省略 project_id 表示全局记忆。"""
+    """保存长期记忆。text 与 messages 二选一；expiration_date 使用 YYYY-MM-DD；省略 project_id 表示全局记忆。"""
     project_id = _project(project_id)
     run_id = _entity_id(run_id, "run_id")
     payload: dict[str, Any] = {
@@ -835,13 +1031,13 @@ async def add_memory(
         internal=True,
         timeout_seconds=TIMEOUT,
     )
-    if (
-        not isinstance(data, dict)
-        or not isinstance(data.get("results"), list)
-        or any(not isinstance(item, dict) for item in data["results"])
-    ):
-        raise RuntimeError("Mem0 新增记忆返回无效响应")
-    return {"ok": True, "results": [_clean(item) for item in data["results"]]}
+    rows = _memory_rows(
+        data,
+        "新增记忆",
+        project_id=project_id,
+        run_id=run_id,
+    )
+    return {"ok": True, "results": [_clean(item) for item in rows]}
 
 
 @mcp.tool(
@@ -882,17 +1078,16 @@ async def search_memories(
         internal=True,
         timeout_seconds=READ_TIMEOUT,
     )
-    unique: dict[str, dict[str, Any]] = {}
-    for item in _rows(data):
-        memory_id = item.get("id")
-        if (
-            isinstance(memory_id, str)
-            and _visible(item, project_id, include_global=bool(project_id))
-            and (not caller_filters or _matches_filter(item, caller_filters))
-        ):
-            unique[memory_id] = item
-    rows = sorted(unique.values(), key=lambda item: float(item.get("score") or 0), reverse=True)
-    return {"results": [_clean(item) for item in rows[:top_k]]}
+    rows = _memory_rows(
+        data,
+        "内部搜索",
+        project_id=project_id,
+        include_global=bool(project_id),
+        filters=caller_filters,
+        maximum=top_k,
+    )
+    rows.sort(key=lambda item: float(item.get("score") or 0), reverse=True)
+    return {"results": [_clean(item) for item in rows]}
 
 
 @mcp.tool(
@@ -925,11 +1120,11 @@ async def get_memories(
         sort_order=sort_order,
     )
     return {
-        "results": [_clean(item) for item in _rows(data)],
-        "count": int(data.get("count", 0)),
+        "results": [_clean(item) for item in data["results"]],
+        "count": data["count"],
         "next": data.get("next"),
         "previous": data.get("previous"),
-        "partial": bool(data.get("partial")),
+        "partial": data["partial"],
     }
 
 
@@ -951,7 +1146,7 @@ async def update_memory(
     metadata: dict[str, Any] | None = None,
     expiration_date: str | None = None,
 ) -> dict[str, Any]:
-    """更新正文、非保留 metadata 或过期时间；传空字符串可清除过期时间。"""
+    """更新正文、非保留 metadata 或 YYYY-MM-DD 过期日期；传空字符串可清除过期时间。"""
     project_id = _project(project_id)
     if text is None and metadata is None and expiration_date is None:
         raise ValueError("text、metadata 或 expiration_date 至少提供一个")
@@ -963,8 +1158,7 @@ async def update_memory(
     if expiration_date is not None:
         payload["expiration_date"] = _expiration(expiration_date, allow_clear=True)
     data = await _internal_memory_action("update", memory_id, project_id, **payload)
-    memory = data.get("memory")
-    return {"ok": True, "memory": _clean(memory) if isinstance(memory, dict) else memory}
+    return {"ok": True, "memory": _clean(data["memory"])}
 
 
 @mcp.tool(
@@ -973,8 +1167,8 @@ async def update_memory(
 async def delete_memory(memory_id: str, project_id: str | None = None) -> dict[str, Any]:
     """永久删除一条受管记忆；调用前必须向用户确认精确 ID。"""
     project_id = _project(project_id)
-    await _internal_memory_action("delete", memory_id, project_id)
-    return {"ok": True, "memory_id": memory_id}
+    data = await _internal_memory_action("delete", memory_id, project_id)
+    return {"ok": True, "memory_id": data["memory_id"]}
 
 
 @mcp.tool(
@@ -984,8 +1178,7 @@ async def get_memory_history(memory_id: str, project_id: str | None = None) -> d
     """读取记忆历史；读取历史前先验证当前记忆的所有权与精确项目范围。"""
     project_id = _project(project_id)
     data = await _internal_memory_action("history", memory_id, project_id)
-    results = data.get("results", [])
-    return {"results": results if isinstance(results, list) else []}
+    return {"results": data["results"]}
 
 
 @mcp.tool(
@@ -1004,9 +1197,9 @@ async def list_entities(
         show_expired=bool(show_expired),
     )
     return {
-        "results": _rows(data),
-        "count": int(data.get("count", 0)),
-        "partial": bool(data.get("partial")),
+        "results": data["results"],
+        "count": data["count"],
+        "partial": data["partial"],
     }
 
 

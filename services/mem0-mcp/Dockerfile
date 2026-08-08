@@ -3,7 +3,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
 WORKDIR /app
 RUN useradd --create-home --uid 10001 appuser
 COPY requirements.lock ./
-RUN pip install --no-cache-dir --requirement requirements.lock && pip check
+RUN pip install --no-cache-dir --require-hashes --requirement requirements.lock && pip check
 COPY --chown=appuser:appuser --chmod=0444 server.py .
 USER appuser
 EXPOSE 8080
