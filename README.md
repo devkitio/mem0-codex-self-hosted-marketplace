@@ -50,7 +50,7 @@
 - Windows 可执行 `python --version`
 - macOS/Linux 可执行 `python3 --version`
 
-插件运行时只使用 Python 标准库，路径、文件锁、原子状态写入和 UTF-8 数据均兼容 Windows、Linux 与 macOS。项目标识与生产 MCP 保持一致，只允许 1～64 位字母、数字、点、下划线或连字符；仓库根目录名不符合该规则时，运行时会生成稳定的 `project-<哈希>` 标识。
+插件运行时只使用 Python 标准库，路径、文件锁、原子状态写入和 UTF-8 数据均兼容 Windows、Linux 与 macOS。项目标识与生产 MCP 保持一致，只允许 1～64 位字母、数字、点、下划线或连字符；自动识别会在本机按只读 Git 远端身份隔离同名仓库，跨机器或多个克隆共享记忆时必须通过 `switch-project` 设置相同的明确 ID。
 
 在自部署 Mem0 控制台生成并保存一个用途为“Codex MCP（受限）”的新 API Key，然后设置为 `MEM0_SELF_HOSTED_API_KEY`。管理员 REST API Key 不能连接 MCP，MCP Key 也不能访问 `/configure`、`/memories`、`/reset` 等管理员接口。Windows PowerShell 可持久写入当前用户环境：
 
@@ -195,6 +195,8 @@ python3 plugins/mem0/scripts/mem0_self_hosted.py --current-project --cwd "/你�
 | `$mem0:switch-project` | 将当前工作区持久映射到指定 `project_id` |
 
 `switch-project` 技能会把工作区到 `project_id` 的映射保存在插件数据目录中，因此切换结果可跨任务生效且不会修改仓库；映射值必须符合生产 MCP 的 1～64 位字符规则，也可以随时恢复为运行时自动识别。
+
+自动范围只承诺本机防碰撞：第一个目录名继续沿用旧 ID，同名但远端不同的后续仓库会获得带哈希的隔离 ID。旧目录名范围里的记忆可能已经混合，插件不会自动迁移或删除；需要跨机器或多个克隆共享时，应在每个副本上显式映射到同一个项目 ID。
 
 自托管服务现提供 10 个工具：旧 6 个工具保持兼容，并增加 `get_memory_history`、`list_entities`、`delete_all_memories` 和 `delete_entities`。同时支持受限 metadata/filters、分页、过期时间和真实 rerank。项目与运行实体从受管记忆推导，不等同于官方云端实体目录；搜索通过一次受限查询同时覆盖当前项目和全局范围，再按分数返回结果。
 

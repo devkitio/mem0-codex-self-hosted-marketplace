@@ -3,13 +3,13 @@
 
 from __future__ import annotations
 
+import configparser
 import hashlib
 import ipaddress
 import json
 import math
 import os
 import re
-import subprocess
 import sys
 import tempfile
 import threading
@@ -20,7 +20,12 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Callable
+from typing import IO, Any, Callable
+
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
 
 
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
@@ -32,6 +37,15 @@ LOG_PATH = PLUGIN_DATA / "mem0_self_hosted.log"
 PROTOCOL_VERSION = "2025-03-26"
 MCP_REQUEST_TIMEOUT = 15
 MCP_MUTATION_TIMEOUT = 50
+HOOK_TIME_BUDGETS = {
+    "PreToolUse": 18.0,
+    "SessionStart": 85.0,
+    "UserPromptSubmit": 22.0,
+    "PostToolUse": 18.0,
+    "Stop": 55.0,
+    "PreCompact": 55.0,
+}
+HOOK_CLEANUP_RESERVE = 2.0
 MAX_MCP_RESPONSE_BYTES = 2_000_000
 MAX_HOOK_INPUT_BYTES = 4_000_000
 MAX_MEMORY_TEXT = 50_000
@@ -123,6 +137,15 @@ PRIVATE_KEY_PATTERN = re.compile(
     r"-----BEGIN [^-\r\n]*PRIVATE KEY-----.*?-----END [^-\r\n]*PRIVATE KEY-----",
     re.DOTALL,
 )
+STANDALONE_SECRET_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9])(?:"
+    r"m0sk_[A-Za-z0-9_-]{20,}"
+    r"|sk-[A-Za-z0-9_-]{20,}"
+    r"|github_pat_[A-Za-z0-9_]{20,}"
+    r"|gh[pousr]_[A-Za-z0-9]{20,}"
+    r"|(?:AKIA|ASIA|AIDA|AROA|AIPA|ANPA|ANVA|ASCA)[A-Z0-9]{16}"
+    r")(?![A-Za-z0-9])"
+)
 TRIVIAL_PROMPTS = {
     "ok",
     "okay",
@@ -152,6 +175,20 @@ SUMMARY_SIGNAL_PATTERN = re.compile(
     re.IGNORECASE,
 )
 ATOMIC_WRITE_LOCK = threading.Lock()
+LOCK_HANDLES: dict[str, IO[bytes]] = {}
+LOCK_HANDLES_GUARD = threading.Lock()
+HOOK_DEADLINE: float | None = None
+
+
+def hook_time_remaining(reserve: float = 0.0) -> float | None:
+    if HOOK_DEADLINE is None:
+        return None
+    return HOOK_DEADLINE - time.monotonic() - reserve
+
+
+def hook_budget_available(minimum: float = 0.0) -> bool:
+    remaining = hook_time_remaining()
+    return remaining is None or remaining > minimum
 
 
 def log_error(message: str) -> None:
@@ -357,6 +394,11 @@ def mcp_request(
 
 def call_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
     timeout_seconds = MCP_MUTATION_TIMEOUT if name in MUTATING_TOOLS else MCP_REQUEST_TIMEOUT
+    remaining = hook_time_remaining(HOOK_CLEANUP_RESERVE)
+    if remaining is not None:
+        if remaining <= 0.1:
+            raise TimeoutError("Hook 总时间预算已耗尽")
+        timeout_seconds = min(timeout_seconds, remaining)
     result = mcp_request(
         "tools/call",
         {"name": name, "arguments": arguments},
@@ -367,19 +409,115 @@ def call_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def _read_small_text(path: Path, max_bytes: int = 4096) -> str:
+    try:
+        with path.open("rb") as handle:
+            raw = handle.read(max_bytes + 1)
+    except OSError:
+        return ""
+    if len(raw) > max_bytes:
+        return ""
+    try:
+        return raw.decode("utf-8").strip()
+    except UnicodeDecodeError:
+        return ""
+
+
+def _git_directory(root: Path) -> Path | None:
+    marker = root / ".git"
+    if marker.is_dir():
+        try:
+            return marker.resolve()
+        except OSError:
+            return None
+    if not marker.is_file():
+        return None
+    value = _read_small_text(marker)
+    if not value.lower().startswith("gitdir:"):
+        return None
+    candidate = Path(value.split(":", 1)[1].strip())
+    if not candidate.is_absolute():
+        candidate = marker.parent / candidate
+    try:
+        candidate = candidate.resolve()
+    except OSError:
+        return None
+    return candidate if candidate.is_dir() and (candidate / "HEAD").is_file() else None
+
+
+def _git_config_path(git_directory: Path) -> Path:
+    common_value = _read_small_text(git_directory / "commondir")
+    if common_value:
+        common = Path(common_value)
+        if not common.is_absolute():
+            common = git_directory / common
+        try:
+            common = common.resolve()
+        except OSError:
+            common = git_directory
+        if common.is_dir():
+            return common / "config"
+    return git_directory / "config"
+
+
+def _normalized_remote_identity(value: str) -> str:
+    remote = value.strip()
+    if not remote:
+        return ""
+    if "://" not in remote:
+        match = re.fullmatch(r"(?:[^@/\\\s]+@)?([A-Za-z0-9.-]+):(.+)", remote)
+        if not match or (len(match.group(1)) == 1 and match.group(2).startswith(("/", "\\"))):
+            return ""
+        host = match.group(1).casefold()
+        path = match.group(2)
+        port = ""
+    else:
+        try:
+            parsed = urllib.parse.urlsplit(remote)
+            if parsed.scheme.casefold() not in {"http", "https", "ssh", "git"} or not parsed.hostname:
+                return ""
+            host = parsed.hostname.casefold()
+            port = f":{parsed.port}" if parsed.port is not None else ""
+            path = urllib.parse.unquote(parsed.path)
+        except ValueError:
+            return ""
+    path = path.replace("\\", "/").strip("/")
+    if path.casefold().endswith(".git"):
+        path = path[:-4]
+    return f"{host}{port}/{path}" if path else ""
+
+
+def _repository_identity_key(root: Path) -> str:
+    git_directory = _git_directory(root)
+    if git_directory is not None:
+        config_text = _read_small_text(_git_config_path(git_directory), max_bytes=65_536)
+        if config_text:
+            parser = configparser.RawConfigParser(interpolation=None, strict=False)
+            try:
+                parser.read_string(config_text)
+            except configparser.Error:
+                parser = configparser.RawConfigParser(interpolation=None, strict=False)
+            remote_sections = [
+                section for section in parser.sections() if section.casefold().startswith('remote "')
+            ]
+            remote_sections.sort(key=lambda section: (section.casefold() != 'remote "origin"', section))
+            for section in remote_sections:
+                identity = _normalized_remote_identity(parser.get(section, "url", fallback=""))
+                if identity:
+                    return hashlib.sha256(b"remote\0" + identity.encode("utf-8")).hexdigest()
+    material = os.fsencode(os.path.normcase(str(root.resolve())))
+    return hashlib.sha256(b"path\0" + material).hexdigest()
+
+
 @lru_cache(maxsize=16)
 def _cached_git_root(working_dir: str) -> Path:
-    try:
-        completed = subprocess.run(
-            ["git", "-C", str(working_dir), "rev-parse", "--show-toplevel"],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=3,
-        )
-        return Path(completed.stdout.strip()).resolve()
-    except (OSError, subprocess.SubprocessError):
-        return Path(working_dir)
+    current = Path(working_dir).resolve()
+    if current.is_file():
+        current = current.parent
+    for candidate in (current, *current.parents):
+        if _git_directory(candidate) is not None:
+            return candidate
+    return current
 
 
 def git_root(cwd: str | None) -> Path:
@@ -389,6 +527,14 @@ def git_root(cwd: str | None) -> Path:
 
 def project_mapping_path() -> Path:
     return PLUGIN_DATA / "project_mappings.json"
+
+
+def project_claims_path() -> Path:
+    return PLUGIN_DATA / "project_claims.json"
+
+
+def project_scope_lock_path() -> Path:
+    return PLUGIN_DATA / "project_scope.lock"
 
 
 def _project_mapping_key(root: Path) -> str:
@@ -414,24 +560,109 @@ def default_project_id(root: Path) -> str:
     return f"project-{digest}"
 
 
+def _mapped_project_id(root: Path, mappings: Any) -> str | None:
+    if not isinstance(mappings, dict):
+        return None
+    value = mappings.get(_project_mapping_key(root))
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        return validate_project_id(value)
+    except ValueError:
+        log_error("忽略不符合生产契约的项目映射")
+        return None
+
+
+def _collision_project_id(legacy_id: str, identity_key: str, claimed: set[str]) -> str:
+    for suffix_length in (12, 16, 24, 32):
+        suffix = identity_key[:suffix_length]
+        prefix = legacy_id[: 63 - suffix_length].rstrip("._-") or "project"
+        candidate = f"{prefix}-{suffix}"
+        if candidate not in claimed:
+            return candidate
+    return f"project-{identity_key[:56]}"
+
+
+def _automatic_project_id(root: Path) -> str:
+    identity_key = _repository_identity_key(root)
+    lock_path = project_scope_lock_path()
+    if not wait_for_lock(lock_path, timeout=5):
+        raise TimeoutError("等待项目范围锁超时")
+    try:
+        mappings = load_json_file(project_mapping_path(), {})
+        mapped = _mapped_project_id(root, mappings)
+        if mapped is not None:
+            return mapped
+        state = load_json_file(project_claims_path(), {})
+        if not isinstance(state, dict) or state.get("version") != 1:
+            state = {"version": 1, "claims": {}}
+        claims = state.get("claims")
+        if not isinstance(claims, dict):
+            claims = {}
+            state["claims"] = claims
+        existing = claims.get(identity_key)
+        if isinstance(existing, dict):
+            project_id = existing.get("project_id")
+            if isinstance(project_id, str):
+                try:
+                    return validate_project_id(project_id)
+                except ValueError:
+                    pass
+        claimed = {
+            record.get("project_id")
+            for record in claims.values()
+            if isinstance(record, dict) and isinstance(record.get("project_id"), str)
+        }
+        if isinstance(mappings, dict):
+            claimed.update(value for value in mappings.values() if isinstance(value, str))
+        legacy_id = default_project_id(root)
+        collision = legacy_id in claimed
+        project_id = (
+            _collision_project_id(legacy_id, identity_key, claimed)
+            if collision
+            else legacy_id
+        )
+        claims[identity_key] = {
+            "project_id": project_id,
+            "legacy_project_id": legacy_id,
+            "collision": collision,
+        }
+        atomic_write_json(project_claims_path(), state)
+        return project_id
+    finally:
+        release_lock(lock_path)
+
+
 def resolve_project_id(cwd: str | None) -> str:
-    """优先使用持久映射，否则使用 Git 根目录名。"""
+    """优先使用显式映射，否则使用带本机冲突保护的自动范围。"""
     root = git_root(cwd)
     mappings = load_json_file(project_mapping_path(), {})
-    if isinstance(mappings, dict):
-        project_id = mappings.get(_project_mapping_key(root))
-        if isinstance(project_id, str) and project_id.strip():
-            try:
-                return validate_project_id(project_id)
-            except ValueError:
-                log_error("忽略不符合生产契约的项目映射")
-    return default_project_id(root)
+    mapped = _mapped_project_id(root, mappings)
+    return mapped if mapped is not None else _automatic_project_id(root)
+
+
+def project_scope_notice(cwd: str | None) -> str:
+    root = git_root(cwd)
+    if _mapped_project_id(root, load_json_file(project_mapping_path(), {})) is not None:
+        return ""
+    state = load_json_file(project_claims_path(), {})
+    claims = state.get("claims", {}) if isinstance(state, dict) else {}
+    record = claims.get(_repository_identity_key(root)) if isinstance(claims, dict) else None
+    if not isinstance(record, dict) or not record.get("collision"):
+        return ""
+    project_id = str(record.get("project_id", ""))
+    legacy_id = str(record.get("legacy_project_id", ""))
+    return (
+        f"检测到同名但身份不同的 Git 仓库；当前工作区已隔离为 project_id `{project_id}`。"
+        f"旧范围 `{legacy_id}` 中可能存在此前混合的记忆，插件不会自动迁移或删除；"
+        "跨机器共享请使用 `mem0:switch-project` 为各副本设置同一个明确的 project_id。"
+    )
 
 
 def set_project_mapping(cwd: str | None, project_id: str | None) -> str:
     root = git_root(cwd)
     path = project_mapping_path()
-    lock_path = path.with_suffix(".lock")
+    lock_path = project_scope_lock_path()
     if not wait_for_lock(lock_path, timeout=5):
         raise TimeoutError("等待项目映射锁超时")
     try:
@@ -442,30 +673,40 @@ def set_project_mapping(cwd: str | None, project_id: str | None) -> str:
         if project_id is None:
             changed = key in mappings
             mappings.pop(key, None)
-            resolved = default_project_id(root)
+            resolved = None
         else:
             resolved = validate_project_id(project_id)
             changed = mappings.get(key) != resolved
             mappings[key] = resolved
         if changed:
             atomic_write_json(path, mappings)
-        return resolved
     finally:
         release_lock(lock_path)
+    return resolve_project_id(str(root)) if resolved is None else resolved
 
 
 def resolve_branch(cwd: str | None) -> str:
-    try:
-        completed = subprocess.run(
-            ["git", "-C", str(git_root(cwd)), "branch", "--show-current"],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=3,
-        )
-        return completed.stdout.strip()[:200]
-    except (OSError, subprocess.SubprocessError):
+    git_directory = _git_directory(git_root(cwd))
+    if git_directory is None:
         return ""
+    value = _read_small_text(git_directory / "HEAD")
+    prefix = "ref: refs/heads/"
+    if not value.startswith(prefix):
+        return ""
+    branch = value[len(prefix) :]
+    forbidden = set(" ~^:?*[\\")
+    if (
+        not branch
+        or len(branch) > 200
+        or any(character in forbidden or ord(character) < 32 for character in branch)
+        or ".." in branch
+        or "@{" in branch
+        or "//" in branch
+        or branch.startswith(("/", "."))
+        or branch.endswith(("/", ".", ".lock"))
+    ):
+        return ""
+    return branch
 
 
 def settings_path() -> Path:
@@ -701,9 +942,9 @@ def identity_context(policy: dict[str, Any]) -> str:
     return "当前项目 `mem0.md` 声明的身份约定：\n" + "\n".join(f"- {line}" for line in lines)
 
 
-def combine_context(memory_context: str, policy: dict[str, Any]) -> str:
+def combine_context(memory_context: str, policy: dict[str, Any], scope_notice: str = "") -> str:
     current_identity = identity_context(policy)
-    return "\n\n".join(part for part in (current_identity, memory_context) if part)
+    return "\n\n".join(part for part in (scope_notice, current_identity, memory_context) if part)
 
 
 def _normalized_prompt(prompt: str) -> str:
@@ -893,6 +1134,7 @@ def redact_sensitive(text: str) -> str:
     value = AUTH_SCHEME_PATTERN.sub("[认证信息已脱敏]", value)
     value = NAMED_SECRET_PATTERN.sub(replace_assignment, value)
     value = URI_CREDENTIAL_PATTERN.sub(r"\g<scheme>[凭据已脱敏]@", value)
+    value = STANDALONE_SECRET_PATTERN.sub("[凭据已脱敏]", value)
     for home in {str(Path.home()), str(Path.home()).replace("\\", "/")}:
         if home:
             value = re.sub(re.escape(home), "[用户目录]", value, flags=re.IGNORECASE)
@@ -1322,6 +1564,9 @@ def delete_memories(
     remaining = list(dict.fromkeys(memory_ids))
     succeeded = True
     for memory_id in list(remaining):
+        if not hook_budget_available(HOOK_CLEANUP_RESERVE + 0.1):
+            log_error("自动导入清理达到 Hook 总时间预算")
+            return False
         try:
             call_tool("delete_memory", {"memory_id": memory_id, "project_id": project_id})
         except Exception as exc:
@@ -1434,38 +1679,82 @@ def add_import_chunk(text: str, project_id: str) -> None:
     call_tool("add_memory", {"text": text, "project_id": project_id, "infer": False})
 
 
+def _lock_key(path: Path) -> str:
+    return os.path.normcase(str(path.resolve()))
+
+
+def _try_lock(handle: IO[bytes]) -> None:
+    handle.seek(0)
+    if os.name == "nt":
+        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+    else:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def _unlock(handle: IO[bytes]) -> None:
+    handle.seek(0)
+    if os.name == "nt":
+        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+    else:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
 def acquire_lock(path: Path, stale_after: int = 120) -> bool:
-    """以独占文件实现跨平台短锁，并回收崩溃遗留的旧锁。"""
+    """使用操作系统文件锁；进程退出时由系统自动释放。"""
+    del stale_after
     path.parent.mkdir(parents=True, exist_ok=True)
+    key = _lock_key(path)
+    with LOCK_HANDLES_GUARD:
+        if key in LOCK_HANDLES:
+            return False
+    handle: IO[bytes] | None = None
     try:
-        descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        os.write(descriptor, str(os.getpid()).encode("ascii"))
-        os.close(descriptor)
-        return True
-    except (FileExistsError, PermissionError):
-        try:
-            if time.time() - path.stat().st_mtime > stale_after:
-                path.unlink()
-                return acquire_lock(path, stale_after)
-        except OSError:
-            pass
+        handle = path.open("a+b")
+        if os.name == "nt" and path.stat().st_size == 0:
+            handle.write(b"\0")
+            handle.flush()
+        _try_lock(handle)
+    except OSError:
+        if handle is not None:
+            try:
+                handle.close()
+            except OSError:
+                pass
         return False
+    with LOCK_HANDLES_GUARD:
+        if key not in LOCK_HANDLES:
+            LOCK_HANDLES[key] = handle
+            return True
+    try:
+        _unlock(handle)
+    finally:
+        handle.close()
+    return False
 
 
 def wait_for_lock(path: Path, timeout: float, stale_after: int = 120) -> bool:
     deadline = time.monotonic() + timeout
-    while not acquire_lock(path, stale_after):
-        if time.monotonic() >= deadline:
-            return False
+    if HOOK_DEADLINE is not None:
+        deadline = min(deadline, HOOK_DEADLINE)
+    while time.monotonic() < deadline:
+        if acquire_lock(path, stale_after):
+            return True
         time.sleep(0.05)
-    return True
+    return False
 
 
 def release_lock(path: Path) -> None:
+    key = _lock_key(path)
+    with LOCK_HANDLES_GUARD:
+        handle = LOCK_HANDLES.pop(key, None)
+    if handle is None:
+        return
     try:
-        path.unlink()
+        _unlock(handle)
     except OSError:
         pass
+    finally:
+        handle.close()
 
 
 def save_import_scope_state(scope: str, scope_state: dict[str, Any]) -> None:
@@ -1530,6 +1819,9 @@ def _auto_import_project_files(cwd: str | None, project_id: str) -> None:
     changed = False
 
     for filename in TARGET_PROJECT_FILES:
+        if not hook_budget_available(HOOK_CLEANUP_RESERVE + 0.25):
+            log_error("自动导入达到 Hook 总时间预算，将在下次启动继续")
+            break
         path = next((directory / filename for directory in search_dirs if (directory / filename).is_file()), None)
         previous = scope_state.get(filename, {})
         had_previous = filename in scope_state
@@ -1593,7 +1885,7 @@ def _auto_import_project_files(cwd: str | None, project_id: str) -> None:
                 if not delete_memories(
                     old_ids,
                     project_id,
-                    progress=lambda remaining, field=field: save_import_id_progress(
+                    progress=lambda remaining, field=field, filename=filename: save_import_id_progress(
                         scope,
                         scope_state,
                         filename,
@@ -1660,7 +1952,7 @@ def _auto_import_project_files(cwd: str | None, project_id: str) -> None:
                         if not delete_memories(
                             old_ids,
                             project_id,
-                            progress=lambda remaining: save_import_id_progress(
+                            progress=lambda remaining, filename=filename: save_import_id_progress(
                                 scope,
                                 scope_state,
                                 filename,
@@ -1688,7 +1980,7 @@ def _auto_import_project_files(cwd: str | None, project_id: str) -> None:
             if not delete_memories(
                 existing_ids,
                 project_id,
-                progress=lambda remaining: save_import_id_progress(
+                progress=lambda remaining, filename=filename: save_import_id_progress(
                     scope,
                     scope_state,
                     filename,
@@ -1723,7 +2015,7 @@ def _auto_import_project_files(cwd: str | None, project_id: str) -> None:
                 if not delete_memories(
                     staged_ids,
                     project_id,
-                    progress=lambda remaining: save_import_id_progress(
+                    progress=lambda remaining, filename=filename: save_import_id_progress(
                         scope,
                         scope_state,
                         filename,
@@ -1772,7 +2064,7 @@ def _auto_import_project_files(cwd: str | None, project_id: str) -> None:
                 if not delete_memories(
                     old_ids,
                     project_id,
-                    progress=lambda remaining: save_import_id_progress(
+                    progress=lambda remaining, filename=filename: save_import_id_progress(
                         scope,
                         scope_state,
                         filename,
@@ -1865,7 +2157,7 @@ def _auto_import_project_files(cwd: str | None, project_id: str) -> None:
                 if not delete_memories(
                     old_ids,
                     project_id,
-                    progress=lambda remaining: save_import_id_progress(
+                    progress=lambda remaining, filename=filename: save_import_id_progress(
                         scope,
                         scope_state,
                         filename,
@@ -1895,10 +2187,7 @@ def auto_import_project_files(cwd: str | None, project_id: str) -> None:
     try:
         _auto_import_project_files(cwd, project_id)
     finally:
-        try:
-            lock_path.unlink()
-        except OSError:
-            pass
+        release_lock(lock_path)
 
 
 def normalized_tool_name(tool_name: str) -> str:
@@ -2127,7 +2416,7 @@ def handle_post_tool(
     emit("PostToolUse", context)
 
 
-def handle_event(hook_input: dict[str, Any]) -> None:
+def _handle_event(hook_input: dict[str, Any]) -> None:
     event = str(hook_input.get("hook_event_name", ""))
     project_id = resolve_project_id(hook_input.get("cwd"))
     policy = parse_mem0_md(hook_input.get("cwd"))
@@ -2143,6 +2432,7 @@ def handle_event(hook_input: dict[str, Any]) -> None:
 
     if event == "SessionStart":
         source = str(hook_input.get("source", ""))
+        scope_notice = project_scope_notice(hook_input.get("cwd"))
         if source in {"startup", "clear"}:
             try:
                 auto_import_project_files(hook_input.get("cwd"), project_id)
@@ -2165,7 +2455,7 @@ def handle_event(hook_input: dict[str, Any]) -> None:
                 )
         if not settings.get("auto_search", True):
             debug_event(settings, "session_search_disabled")
-            emit(event, identity_context(policy))
+            emit(event, combine_context("", policy, scope_notice))
             return
         queries = build_search_queries(
             "项目目标、关键架构决定、最近完成事项、待办和用户稳定偏好",
@@ -2178,6 +2468,7 @@ def handle_event(hook_input: dict[str, Any]) -> None:
             combine_context(
                 format_context(result, limit=int(settings["search_limit"])),
                 policy,
+                scope_notice,
             ),
         )
         return
@@ -2204,6 +2495,20 @@ def handle_event(hook_input: dict[str, Any]) -> None:
         return
 
     emit(event or "SessionStart")
+
+
+def handle_event(hook_input: dict[str, Any]) -> None:
+    global HOOK_DEADLINE
+    event = str(hook_input.get("hook_event_name", ""))
+    budget = HOOK_TIME_BUDGETS.get(event)
+    previous_deadline = HOOK_DEADLINE
+    if budget is not None:
+        deadline = time.monotonic() + budget
+        HOOK_DEADLINE = min(previous_deadline, deadline) if previous_deadline is not None else deadline
+    try:
+        _handle_event(hook_input)
+    finally:
+        HOOK_DEADLINE = previous_deadline
 
 
 def _schema_values(schema: Any, key: str) -> list[Any]:

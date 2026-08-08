@@ -5,6 +5,8 @@ import importlib.util
 import io
 import json
 import os
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -14,7 +16,6 @@ from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
-
 
 SCRIPT = Path(__file__).resolve().parents[1] / "plugins" / "mem0" / "scripts" / "mem0_self_hosted.py"
 SPEC = importlib.util.spec_from_file_location("mem0_self_hosted", SCRIPT)
@@ -159,6 +160,87 @@ class Mem0SelfHostedTests(unittest.TestCase):
             mem0.call_tool("add_memory", {"text": "测试"})
             self.assertEqual(request.call_args.args[2], mem0.MCP_MUTATION_TIMEOUT)
 
+    def test_Hook总预算约束请求和锁等待(self):
+        with mock.patch.object(mem0, "HOOK_DEADLINE", 110.0), mock.patch.object(
+            mem0.time,
+            "monotonic",
+            return_value=100.0,
+        ), mock.patch.object(
+            mem0,
+            "mcp_request",
+            return_value={"isError": False},
+        ) as request:
+            mem0.call_tool("add_memory", {"text": "测试"})
+        self.assertEqual(request.call_args.args[2], 8.0)
+
+        with mock.patch.object(mem0, "HOOK_DEADLINE", 101.0), mock.patch.object(
+            mem0.time,
+            "monotonic",
+            return_value=100.0,
+        ), mock.patch.object(mem0, "mcp_request") as request:
+            with self.assertRaisesRegex(TimeoutError, "总时间预算"):
+                mem0.call_tool("add_memory", {"text": "测试"})
+        request.assert_not_called()
+
+        with mock.patch.object(mem0, "HOOK_DEADLINE", 100.05), mock.patch.object(
+            mem0,
+            "acquire_lock",
+            return_value=False,
+        ) as acquire, mock.patch.object(mem0.time, "monotonic", side_effect=[100.0, 100.1]):
+            self.assertFalse(mem0.wait_for_lock(Path("never.lock"), timeout=20))
+        acquire.assert_not_called()
+
+    def test_Hook入口设置并恢复事件总预算(self):
+        observed = []
+        with mock.patch.object(mem0, "HOOK_DEADLINE", None), mock.patch.object(
+            mem0.time,
+            "monotonic",
+            return_value=100.0,
+        ), mock.patch.object(
+            mem0,
+            "_handle_event",
+            side_effect=lambda _value: observed.append(mem0.HOOK_DEADLINE),
+        ):
+            mem0.handle_event({"hook_event_name": "Stop"})
+            self.assertIsNone(mem0.HOOK_DEADLINE)
+
+        self.assertEqual(observed, [100.0 + mem0.HOOK_TIME_BUDGETS["Stop"]])
+
+    def test_自动导入预算耗尽前保留待恢复状态(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            root = base / "project"
+            data = base / "data"
+            root.mkdir()
+            (root / "AGENTS.md").write_text("目标：验证预算恢复。\n" * 10, encoding="utf-8")
+            clock = [100.0]
+
+            def fake_call(name, _arguments):
+                if name == "add_memory":
+                    clock[0] = 109.0
+                    return {}
+                return {"structuredContent": {"results": []}}
+
+            with mock.patch.object(mem0, "PLUGIN_DATA", data), mock.patch.object(
+                mem0,
+                "git_root",
+                return_value=root,
+            ), mock.patch.object(mem0, "resolve_branch", return_value=""), mock.patch.object(
+                mem0,
+                "HOOK_DEADLINE",
+                110.0,
+            ), mock.patch.object(
+                mem0.time,
+                "monotonic",
+                side_effect=lambda: clock[0],
+            ), mock.patch.object(mem0, "call_tool", side_effect=fake_call):
+                mem0._auto_import_project_files(str(root), "demo-project")
+
+            state = mem0.load_json_file(data / "auto_import_state.json", {})
+            scope = mem0.import_scope_key(root, "demo-project")
+            self.assertTrue(state[scope]["AGENTS.md"]["pending"])
+            self.assertEqual(state[scope]["AGENTS.md"]["memory_ids"], [])
+
     def test_MCP_地址和重定向不会泄漏令牌(self):
         for url in (
             "http://10.20.30.40/mcp",
@@ -259,6 +341,24 @@ class Mem0SelfHostedTests(unittest.TestCase):
         self.assertNotIn("aws-secret", context)
         self.assertNotIn("10.20.30.40", context)
         self.assertIn("[mem0:memory-1]", context)
+
+    def test_独立粘贴的常见凭据会脱敏(self):
+        secrets = (
+            "m0sk_" + "A" * 48,
+            "sk-proj-" + "B" * 40,
+            "ghp_" + "c" * 36,
+            "AKIA" + "D" * 16,
+        )
+        redacted = mem0.redact_sensitive("，".join(secrets))
+
+        for secret in secrets:
+            self.assertNotIn(secret, redacted)
+        self.assertEqual(redacted.count("[凭据已脱敏]"), len(secrets))
+        self.assertIn("m0sk_示例", mem0.redact_sensitive("m0sk_示例"))
+
+        json_text = json.dumps({"value": secrets[0]}, ensure_ascii=False)
+        self.assertNotIn(secrets[0], mem0.redact_sensitive(json_text))
+        self.assertIn("M0SK_" + "A" * 48, mem0.redact_sensitive("M0SK_" + "A" * 48))
 
     def test_原子写入并发使用独立临时文件(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1083,6 +1183,49 @@ class Mem0SelfHostedTests(unittest.TestCase):
                 self.assertEqual(mem0.set_project_mapping(str(root), None), root.name)
                 self.assertEqual(mem0.resolve_project_id(str(root)), root.name)
 
+    def test_同名仓库按远端身份隔离且显式映射可消除提示(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            data = base / "plugin-data"
+
+            def create_repo(parent, remote):
+                root = base / parent / "shared-name"
+                git_directory = root / ".git"
+                git_directory.mkdir(parents=True)
+                (git_directory / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+                (git_directory / "config").write_text(
+                    f'[remote "origin"]\n\turl = {remote}\n',
+                    encoding="utf-8",
+                )
+                return root
+
+            first = create_repo("first", "git@github.com:team/first.git")
+            second = create_repo("second", "https://github.com/team/second.git")
+            clone = create_repo("clone", "ssh://git@github.com/team/first.git")
+            mem0._cached_git_root.cache_clear()
+            try:
+                with mock.patch.object(mem0, "PLUGIN_DATA", data):
+                    first_id = mem0.resolve_project_id(str(first))
+                    second_id = mem0.resolve_project_id(str(second))
+                    clone_id = mem0.resolve_project_id(str(clone))
+
+                    self.assertEqual(first_id, "shared-name")
+                    self.assertNotEqual(second_id, first_id)
+                    self.assertRegex(second_id, r"^shared-name-[0-9a-f]{12}$")
+                    self.assertEqual(clone_id, first_id)
+                    notice = mem0.project_scope_notice(str(second))
+                    self.assertIn(second_id, notice)
+                    self.assertIn(first_id, notice)
+                    self.assertIn("不会自动迁移", notice)
+
+                    self.assertEqual(
+                        mem0.set_project_mapping(str(second), "shared-team-project"),
+                        "shared-team-project",
+                    )
+                    self.assertEqual(mem0.project_scope_notice(str(second)), "")
+            finally:
+                mem0._cached_git_root.cache_clear()
+
     def test_项目标识与生产契约一致(self):
         with tempfile.TemporaryDirectory() as directory:
             data = Path(directory) / "plugin-data"
@@ -1154,16 +1297,120 @@ class Mem0SelfHostedTests(unittest.TestCase):
     def test_git根目录查询在单次进程内缓存(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
-            completed = mock.Mock(stdout=f"{root}\n")
+            nested = root / "src" / "module"
+            nested.mkdir(parents=True)
+            git_directory = root / ".git"
+            git_directory.mkdir()
+            (git_directory / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
             mem0._cached_git_root.cache_clear()
             try:
-                with mock.patch.object(mem0.subprocess, "run", return_value=completed) as run:
-                    self.assertEqual(mem0.git_root(str(root)), root)
-                    self.assertEqual(mem0.git_root(str(root)), root)
-                    self.assertEqual(mem0.git_root(str(root)), root)
-                run.assert_called_once()
+                self.assertEqual(mem0.git_root(str(nested)), root)
+                (git_directory / "HEAD").unlink()
+                git_directory.rmdir()
+                self.assertEqual(mem0.git_root(str(nested)), root)
+                mem0._cached_git_root.cache_clear()
+                self.assertEqual(mem0.git_root(str(nested)), nested)
             finally:
                 mem0._cached_git_root.cache_clear()
+
+    def test_git工作树指针和分支只用标准库解析(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory).resolve()
+            root = base / "workspace"
+            nested = root / "src"
+            git_directory = base / "git-metadata"
+            nested.mkdir(parents=True)
+            git_directory.mkdir()
+            (root / ".git").write_text("gitdir: ../git-metadata\n", encoding="utf-8")
+            (git_directory / "HEAD").write_text(
+                "ref: refs/heads/feature/windows-safe\n",
+                encoding="utf-8",
+            )
+            mem0._cached_git_root.cache_clear()
+            try:
+                self.assertEqual(mem0.git_root(str(nested)), root)
+                self.assertEqual(mem0.resolve_branch(str(nested)), "feature/windows-safe")
+                (git_directory / "HEAD").write_text("a" * 40 + "\n", encoding="utf-8")
+                self.assertEqual(mem0.resolve_branch(str(nested)), "")
+            finally:
+                mem0._cached_git_root.cache_clear()
+
+    @unittest.skipIf(os.name == "nt", "Windows 测试环境不保证允许创建符号链接")
+    def test_git目录符号链接可被只读解析(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory).resolve()
+            root = base / "workspace"
+            nested = root / "src"
+            git_directory = base / "git-metadata"
+            nested.mkdir(parents=True)
+            git_directory.mkdir()
+            (git_directory / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+            (root / ".git").symlink_to(git_directory, target_is_directory=True)
+            mem0._cached_git_root.cache_clear()
+            try:
+                self.assertEqual(mem0.git_root(str(nested)), root)
+                self.assertEqual(mem0.resolve_branch(str(nested)), "main")
+            finally:
+                mem0._cached_git_root.cache_clear()
+
+    def test_git元数据读取受大小和引用格式限制(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            git_directory = root / ".git"
+            git_directory.mkdir()
+            (git_directory / "HEAD").write_text("ref: refs/heads/" + "x" * 5000, encoding="utf-8")
+            mem0._cached_git_root.cache_clear()
+            try:
+                self.assertEqual(mem0.git_root(str(root)), root)
+                self.assertEqual(mem0.resolve_branch(str(root)), "")
+                (git_directory / "HEAD").write_text(
+                    "ref: refs/heads/feature/../../config\n",
+                    encoding="utf-8",
+                )
+                self.assertEqual(mem0.resolve_branch(str(root)), "")
+            finally:
+                mem0._cached_git_root.cache_clear()
+
+    def test_文件锁不会按_mtime_抢占且进程退出后自动释放(self):
+        with tempfile.TemporaryDirectory() as directory:
+            lock_path = Path(directory) / "state.lock"
+            self.assertTrue(mem0.acquire_lock(lock_path, stale_after=1))
+            os.utime(lock_path, (0, 0))
+            self.assertFalse(mem0.acquire_lock(lock_path, stale_after=0))
+            mem0.release_lock(lock_path)
+
+            ready_path = Path(directory) / "ready"
+            child_code = (
+                "import importlib.util,pathlib,sys,time;"
+                "spec=importlib.util.spec_from_file_location('child_mem0',sys.argv[1]);"
+                "module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module);"
+                "lock=pathlib.Path(sys.argv[2]);ready=pathlib.Path(sys.argv[3]);"
+                "assert module.acquire_lock(lock);ready.write_text('ready',encoding='utf-8');"
+                "time.sleep(30)"
+            )
+            process = subprocess.Popen(
+                [sys.executable, "-c", child_code, str(SCRIPT), str(lock_path), str(ready_path)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            acquired = False
+            try:
+                deadline = time.monotonic() + 5
+                while not ready_path.exists() and process.poll() is None and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                self.assertTrue(ready_path.exists())
+                self.assertFalse(mem0.acquire_lock(lock_path))
+                process.terminate()
+                process.wait(timeout=5)
+                acquired = mem0.wait_for_lock(lock_path, timeout=3)
+                self.assertTrue(acquired)
+                self.assertTrue(lock_path.exists())
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                    process.wait(timeout=5)
+                if acquired:
+                    mem0.release_lock(lock_path)
 
     def test_项目状态键遵循当前系统的路径大小写语义(self):
         first = Path("workspace") / "Project"
@@ -1353,6 +1600,22 @@ class Mem0SelfHostedTests(unittest.TestCase):
 
         self.assertEqual(result, "URL 请求失败")
         self.assertNotIn("network-secret", result)
+
+    def test_文档搜索在非_UTF8_控制台仍输出_UTF8(self):
+        environment = dict(os.environ)
+        environment["PYTHONIOENCODING"] = "cp1252"
+        completed = subprocess.run(
+            [sys.executable, str(DOC_SCRIPT), "--section", "api"],
+            check=False,
+            capture_output=True,
+            env=environment,
+            timeout=10,
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr.decode("utf-8", errors="replace"))
+        output = completed.stdout.decode("utf-8")
+        self.assertIn("区段：api", output)
+        self.assertIn("https://docs.mem0.ai/api-reference", output)
 
     def test_压缩后会话启动提取并保存真实摘要(self):
         with tempfile.TemporaryDirectory() as directory:

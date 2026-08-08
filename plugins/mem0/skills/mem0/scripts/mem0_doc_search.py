@@ -190,7 +190,16 @@ def list_section(section: str) -> dict:
     }
 
 
+def configure_utf8_output() -> None:
+    """覆盖 Windows 继承的旧控制台编码，保证中文输出稳定。"""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            reconfigure(encoding="utf-8", errors="replace")
+
+
 def main():
+    configure_utf8_output()
     parser = argparse.ArgumentParser(description="按需检索 Mem0 官方文档")
     parser.add_argument("--query", help="文档搜索词")
     parser.add_argument("--page", help="具体页面路径，例如 /platform/features/graph-memory")
