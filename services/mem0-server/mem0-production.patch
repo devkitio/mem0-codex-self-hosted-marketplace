@@ -631,7 +631,7 @@ index 0000000000000000000000000000000000000000..e11701d28e29c3e48ef9bf0c6316406a
 +    op.drop_constraint("ck_api_keys_purpose", "api_keys", type_="check")
 +    op.drop_column("api_keys", "purpose")
 diff --git a/server/auth.py b/server/auth.py
-index ee4959b54ee3621b48dfef764af688bb7f97aba7..301de102c3674d94d2fa5cc7cbc484dbf7e0366d 100644
+index ee4959b54ee3621b48dfef764af688bb7f97aba7..de2d7cdbf5fa87c9f1da55e64ae30f3711106854 100644
 --- a/server/auth.py
 +++ b/server/auth.py
 @@ -4,0 +5 @@ from datetime import datetime, timedelta, timezone
@@ -646,7 +646,7 @@ index ee4959b54ee3621b48dfef764af688bb7f97aba7..301de102c3674d94d2fa5cc7cbc484db
 @@ -12 +15 @@ from passlib.context import CryptContext
 -from sqlalchemy import select, update
 +from sqlalchemy import or_, select, update
-@@ -15 +18,17 @@ from sqlalchemy.orm import Session
+@@ -15 +18,30 @@ from sqlalchemy.orm import Session
 -JWT_SECRET = os.environ.get("JWT_SECRET", "")
 +load_dotenv()
 +
@@ -664,22 +664,35 @@ index ee4959b54ee3621b48dfef764af688bb7f97aba7..301de102c3674d94d2fa5cc7cbc484db
 +    return os.environ.get(name, "").strip()
 +
 +
-+JWT_SECRET = _secret("JWT_SECRET")
-@@ -19 +38 @@ REFRESH_TOKEN_EXPIRE_DAYS = 30
++def _load_jwt_secret() -> str:
++    value = _secret("JWT_SECRET")
++    if not value:
++        return value
++    if len(value) < 32:
++        raise RuntimeError("JWT_SECRET 必须至少包含 32 个字符")
++    if len(value) > 512:
++        raise RuntimeError("JWT_SECRET 不得超过 512 个字符")
++    if any(not 33 <= ord(character) <= 126 for character in value):
++        raise RuntimeError("JWT_SECRET 必须仅包含可见 ASCII 字符")
++    return value
++
++
++JWT_SECRET = _load_jwt_secret()
+@@ -19 +51 @@ REFRESH_TOKEN_EXPIRE_DAYS = 30
 -ADMIN_API_KEY = os.environ.get("ADMIN_API_KEY", "")
 +ADMIN_API_KEY = _secret("ADMIN_API_KEY")
-@@ -20,0 +40,4 @@ AUTH_DISABLED = os.environ.get("AUTH_DISABLED", "").lower() in {"1", "true", "ye
+@@ -20,0 +53,4 @@ AUTH_DISABLED = os.environ.get("AUTH_DISABLED", "").lower() in {"1", "true", "ye
 +API_KEY_PURPOSE_ADMIN = "admin"
 +API_KEY_PURPOSE_MCP = "mcp"
 +API_KEY_PURPOSES = {API_KEY_PURPOSE_ADMIN, API_KEY_PURPOSE_MCP}
 +API_KEY_LAST_USED_INTERVAL = timedelta(minutes=15)
-@@ -100 +123 @@ def decode_token(token: str) -> dict:
+@@ -100 +136 @@ def decode_token(token: str) -> dict:
 -    except JWTError:
 +    except InvalidTokenError:
-@@ -126 +149 @@ def _resolve_user_from_jwt(token: str, db: Session) -> User:
+@@ -126 +162 @@ def _resolve_user_from_jwt(token: str, db: Session) -> User:
 -def _resolve_user_from_api_key(key: str, db: Session) -> User:
 +def _resolve_user_from_api_key(key: str, db: Session) -> tuple[User, str]:
-@@ -134,2 +157,15 @@ def _resolve_user_from_api_key(key: str, db: Session) -> User:
+@@ -134,2 +170,15 @@ def _resolve_user_from_api_key(key: str, db: Session) -> User:
 -            candidate.last_used_at = datetime.now(timezone.utc)
 -            db.commit()
 +            purpose = candidate.purpose
@@ -697,27 +710,27 @@ index ee4959b54ee3621b48dfef764af688bb7f97aba7..301de102c3674d94d2fa5cc7cbc484db
 +                    .values(last_used_at=now)
 +                )
 +                db.commit()
-@@ -139 +175 @@ def _resolve_user_from_api_key(key: str, db: Session) -> User:
+@@ -139 +188 @@ def _resolve_user_from_api_key(key: str, db: Session) -> User:
 -            return user
 +            return user, purpose
-@@ -155,0 +192 @@ async def verify_auth(
+@@ -155,0 +205 @@ async def verify_auth(
 +        request.state.api_key_purpose = None
-@@ -161,0 +199 @@ async def verify_auth(
+@@ -161,0 +212 @@ async def verify_auth(
 +            request.state.api_key_purpose = API_KEY_PURPOSE_ADMIN
-@@ -165 +203,3 @@ async def verify_auth(
+@@ -165 +216,3 @@ async def verify_auth(
 -            return _resolve_user_from_api_key(x_api_key, db)
 +            user, purpose = _resolve_user_from_api_key(x_api_key, db)
 +        request.state.api_key_purpose = purpose
 +        return user
-@@ -168,0 +209 @@ async def verify_auth(
+@@ -168,0 +222 @@ async def verify_auth(
 +        request.state.api_key_purpose = API_KEY_PURPOSE_ADMIN
-@@ -182,0 +224,2 @@ async def require_auth(
+@@ -182,0 +237,2 @@ async def require_auth(
 +    if getattr(request.state, "api_key_purpose", None) == API_KEY_PURPOSE_MCP:
 +        raise HTTPException(status_code=403, detail="MCP API keys cannot access administrator endpoints.")
-@@ -207,0 +251,2 @@ async def require_admin(
+@@ -207,0 +264,2 @@ async def require_admin(
 +    if getattr(request.state, "api_key_purpose", None) == API_KEY_PURPOSE_MCP:
 +        raise HTTPException(status_code=403, detail="MCP API keys cannot access administrator endpoints.")
-@@ -220,0 +266,13 @@ async def require_admin(
+@@ -220,0 +279,13 @@ async def require_admin(
 +
 +
 +async def require_mcp_api_key(
@@ -8340,7 +8353,7 @@ index 14d0907bc4d49850eadbf96f64a214e3324cb2b0..3b8ded79f615b09fdd335c2a84b6971f
 -    logging.exception("Upstream provider error (code=%s)", code)
 +    logging.error("上游服务错误（code=%s，exception_type=%s）", code, type(exc).__name__ if exc else "unknown")
 diff --git a/server/main.py b/server/main.py
-index 20059fb8ed6075f7371f89215cb7990d8566a066..1963be6fd194b32f8e8aa41088716d1c1ed39669 100644
+index 20059fb8ed6075f7371f89215cb7990d8566a066..14fa78bbdaee9f18b068c2b1eeefa935f508fe0d 100644
 --- a/server/main.py
 +++ b/server/main.py
 @@ -1,0 +2,3 @@ import asyncio
@@ -8563,7 +8576,7 @@ index 20059fb8ed6075f7371f89215cb7990d8566a066..1963be6fd194b32f8e8aa41088716d1c
 +        status_code=404 if not_found else 400,
 +        detail="请求的资源不存在" if not_found else "请求参数无效",
 +    )
-@@ -231,0 +348,737 @@ def _redact_config(value: Any, key: str | None = None) -> Any:
+@@ -231,0 +348,745 @@ def _redact_config(value: Any, key: str | None = None) -> Any:
 +_INTERNAL_FILTER_FIELDS = {"metadata", "run_id", "created_at", "updated_at", "expiration_date"}
 +_INTERNAL_FILTER_LOGICAL = {"AND", "OR", "NOT"}
 +_INTERNAL_FILTER_OPERATORS = {"eq", "ne", "in", "nin", "gt", "gte", "lt", "lte", "contains", "icontains"}
@@ -8715,6 +8728,12 @@ index 20059fb8ed6075f7371f89215cb7990d8566a066..1963be6fd194b32f8e8aa41088716d1c
 +_FILTER_MISSING = object()
 +
 +
++def _json_equal(left: Any, right: Any) -> bool:
++    if isinstance(left, bool) or isinstance(right, bool):
++        return isinstance(left, bool) and isinstance(right, bool) and left is right
++    return left == right
++
++
 +def _filter_and(values: List[Optional[bool]]) -> Optional[bool]:
 +    if any(value is False for value in values):
 +        return False
@@ -8736,22 +8755,24 @@ index 20059fb8ed6075f7371f89215cb7990d8566a066..1963be6fd194b32f8e8aa41088716d1c
 +    if actual is _FILTER_MISSING or actual is None:
 +        return None
 +    if not isinstance(condition, dict):
-+        return actual == condition
++        return _json_equal(actual, condition)
 +    operator, expected = next(iter(condition.items()))
 +    if operator == "eq":
-+        return actual == expected
++        return _json_equal(actual, expected)
 +    if operator == "ne":
-+        return actual != expected
++        return not _json_equal(actual, expected)
 +    if operator == "in":
-+        return actual in expected
++        return any(_json_equal(actual, item) for item in expected)
 +    if operator == "nin":
-+        return actual not in expected
++        return not any(_json_equal(actual, item) for item in expected)
 +    if operator in {"contains", "icontains"}:
 +        if isinstance(actual, list):
-+            return expected in actual
++            return any(_json_equal(item, expected) for item in actual)
 +        if not isinstance(actual, str) or not isinstance(expected, str):
 +            return False
 +        return expected.lower() in actual.lower() if operator == "icontains" else expected in actual
++    if isinstance(actual, bool) or isinstance(expected, bool):
++        return False
 +    try:
 +        if operator == "gt":
 +            return actual > expected
@@ -9301,13 +9322,13 @@ index 20059fb8ed6075f7371f89215cb7990d8566a066..1963be6fd194b32f8e8aa41088716d1c
 +    return hmac.compare_digest(_memory_version(item), expected_version)
 +
 +
-@@ -287 +1140 @@ def _persist_request_log(method: str, path: str, status_code: int, latency_ms: f
+@@ -287 +1148 @@ def _persist_request_log(method: str, path: str, status_code: int, latency_ms: f
 -        logging.exception("Failed to persist request log")
 +        logging.warning("请求日志持久化失败")
-@@ -323 +1176 @@ async def log_requests(request: Request, call_next):
+@@ -323 +1184 @@ async def log_requests(request: Request, call_next):
 -def get_config(_auth=Depends(verify_auth)):
 +def get_config(_auth=Depends(require_admin)):
-@@ -326,0 +1180,49 @@ def get_config(_auth=Depends(verify_auth)):
+@@ -326,0 +1188,49 @@ def get_config(_auth=Depends(verify_auth)):
 +@app.get("/api/livez", include_in_schema=False)
 +def api_livez():
 +    return {"status": "ok"}
@@ -9357,32 +9378,32 @@ index 20059fb8ed6075f7371f89215cb7990d8566a066..1963be6fd194b32f8e8aa41088716d1c
 +    return _readiness_response()
 +
 +
-@@ -328 +1230 @@ def get_config(_auth=Depends(verify_auth)):
+@@ -328 +1238 @@ def get_config(_auth=Depends(verify_auth)):
 -def list_bundled_providers(_auth=Depends(verify_auth)):
 +def list_bundled_providers(_auth=Depends(require_admin)):
-@@ -341 +1243 @@ def set_config(config: Dict[str, Any], _auth=Depends(require_admin)):
+@@ -341 +1251 @@ def set_config(config: Dict[str, Any], _auth=Depends(require_admin)):
 -def generate_instructions(req: GenerateInstructionsRequest, _auth=Depends(verify_auth)):
 +def generate_instructions(req: GenerateInstructionsRequest, _auth=Depends(require_admin)):
-@@ -368 +1270 @@ def generate_instructions(req: GenerateInstructionsRequest, _auth=Depends(verify
+@@ -368 +1278 @@ def generate_instructions(req: GenerateInstructionsRequest, _auth=Depends(verify
 -def add_memory(memory_create: MemoryCreate, _auth=Depends(verify_auth)):
 +def add_memory(memory_create: MemoryCreate, _auth=Depends(require_admin)):
-@@ -419 +1321 @@ def get_all_memories(
+@@ -419 +1329 @@ def get_all_memories(
 -    _auth=Depends(verify_auth),
 +    _auth=Depends(require_admin),
-@@ -444 +1346 @@ def get_all_memories(
+@@ -444 +1354 @@ def get_all_memories(
 -def get_memory(memory_id: str, _auth=Depends(verify_auth)):
 +def get_memory(memory_id: str, _auth=Depends(require_admin)):
-@@ -447 +1349,2 @@ def get_memory(memory_id: str, _auth=Depends(verify_auth)):
+@@ -447 +1357,2 @@ def get_memory(memory_id: str, _auth=Depends(verify_auth)):
 -        return get_memory_instance().get(memory_id)
 +        with _memory_operation_lock(memory_id):
 +            return get_memory_instance().get(memory_id)
-@@ -453 +1356 @@ def get_memory(memory_id: str, _auth=Depends(verify_auth)):
+@@ -453 +1364 @@ def get_memory(memory_id: str, _auth=Depends(verify_auth)):
 -def search_memories(search_req: SearchRequest, _auth=Depends(verify_auth)):
 +def search_memories(search_req: SearchRequest, _auth=Depends(require_admin)):
-@@ -473,0 +1377,2 @@ def search_memories(search_req: SearchRequest, _auth=Depends(verify_auth)):
+@@ -473,0 +1385,2 @@ def search_memories(search_req: SearchRequest, _auth=Depends(verify_auth)):
 +        if search_req.rerank is not None:
 +            params["rerank"] = search_req.rerank
-@@ -478,3 +1383,238 @@ def search_memories(search_req: SearchRequest, _auth=Depends(verify_auth)):
+@@ -478,3 +1391,7 @@ def search_memories(search_req: SearchRequest, _auth=Depends(verify_auth)):
 -        return get_memory_instance().search(query=search_req.query, filters=filters, **params)
 -    except ValueError as e:
 -        raise HTTPException(status_code=400, detail=str(e))
@@ -9393,12 +9414,7 @@ index 20059fb8ed6075f7371f89215cb7990d8566a066..1963be6fd194b32f8e8aa41088716d1c
 +        )
 +    except (ValueError, Mem0ValidationError) as exc:
 +        raise _client_error(exc)
-+    except HTTPException:
-+        raise
-+    except Exception:
-+        raise upstream_error()
-+
-+
+@@ -486,0 +1404,325 @@ def search_memories(search_req: SearchRequest, _auth=Depends(verify_auth)):
 +@app.post("/internal/mcp/search", include_in_schema=False)
 +def internal_mcp_search(
 +    request: InternalMemorySearch,
@@ -9624,7 +9640,8 @@ index 20059fb8ed6075f7371f89215cb7990d8566a066..1963be6fd194b32f8e8aa41088716d1c
 +            if not isinstance(updated, dict) or not _matches_managed_scope(updated, request.project_id):
 +                raise RuntimeError("Mem0 更新记忆后返回无效响应")
 +            return {"memory": updated}
-@@ -482,0 +1623,94 @@ def search_memories(search_req: SearchRequest, _auth=Depends(verify_auth)):
++    except HTTPException:
++        raise
 +    except (ValueError, Mem0ValidationError) as exc:
 +        raise _client_error(exc)
 +    except Exception:
@@ -9719,32 +9736,36 @@ index 20059fb8ed6075f7371f89215cb7990d8566a066..1963be6fd194b32f8e8aa41088716d1c
 +        raise
 +    except (ValueError, Mem0ValidationError) as exc:
 +        raise _client_error(exc)
-@@ -488 +1722 @@ def search_memories(search_req: SearchRequest, _auth=Depends(verify_auth)):
++    except Exception:
++        raise upstream_error()
++
++
+@@ -488 +1730 @@ def search_memories(search_req: SearchRequest, _auth=Depends(verify_auth)):
 -def update_memory(memory_id: str, updated_memory: MemoryUpdate, _auth=Depends(verify_auth)):
 +def update_memory(memory_id: str, updated_memory: MemoryUpdate, _auth=Depends(require_admin)):
-@@ -499 +1733,4 @@ def update_memory(memory_id: str, updated_memory: MemoryUpdate, _auth=Depends(ve
+@@ -499 +1741,4 @@ def update_memory(memory_id: str, updated_memory: MemoryUpdate, _auth=Depends(ve
 -        return get_memory_instance().update(**params)
 +        with _memory_operation_lock(memory_id):
 +            return get_memory_instance().update(**params)
 +    except HTTPException:
 +        raise
-@@ -507 +1744 @@ def update_memory(memory_id: str, updated_memory: MemoryUpdate, _auth=Depends(ve
+@@ -507 +1752 @@ def update_memory(memory_id: str, updated_memory: MemoryUpdate, _auth=Depends(ve
 -def memory_history(memory_id: str, _auth=Depends(verify_auth)):
 +def memory_history(memory_id: str, _auth=Depends(require_admin)):
-@@ -510 +1747,4 @@ def memory_history(memory_id: str, _auth=Depends(verify_auth)):
+@@ -510 +1755,4 @@ def memory_history(memory_id: str, _auth=Depends(verify_auth)):
 -        return get_memory_instance().history(memory_id=memory_id)
 +        with _memory_operation_lock(memory_id):
 +            return get_memory_instance().history(memory_id=memory_id)
 +    except HTTPException:
 +        raise
-@@ -516 +1756 @@ def memory_history(memory_id: str, _auth=Depends(verify_auth)):
+@@ -516 +1764 @@ def memory_history(memory_id: str, _auth=Depends(verify_auth)):
 -def delete_memory(memory_id: str, _auth=Depends(verify_auth)):
 +def delete_memory(memory_id: str, _auth=Depends(require_admin)):
-@@ -519 +1759,2 @@ def delete_memory(memory_id: str, _auth=Depends(verify_auth)):
+@@ -519 +1767,2 @@ def delete_memory(memory_id: str, _auth=Depends(verify_auth)):
 -        get_memory_instance().delete(memory_id=memory_id)
 +        with _memory_operation_lock(memory_id):
 +            get_memory_instance().delete(memory_id=memory_id)
-@@ -520,0 +1762,2 @@ def delete_memory(memory_id: str, _auth=Depends(verify_auth)):
+@@ -520,0 +1770,2 @@ def delete_memory(memory_id: str, _auth=Depends(verify_auth)):
 +    except HTTPException:
 +        raise
 diff --git a/server/mcp_scope.py b/server/mcp_scope.py
@@ -11645,10 +11666,10 @@ index b7b882a3e2448a52ca4a6392296d2411cf91e815..f06619cc762984cb78d6c0c343a8f269
 +    logging.info("首条记忆已保存，可在控制台中查看和管理")
 diff --git a/server/test_main.py b/server/test_main.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..d3fd88a5941c5df0f1394ff317e03bcc3454a4ae
+index 0000000000000000000000000000000000000000..7917894949eb59a6f81c9686fbbc9a8023d3ec22
 --- /dev/null
 +++ b/server/test_main.py
-@@ -0,0 +1,1229 @@
+@@ -0,0 +1,1297 @@
 +import json
 +import logging
 +import os
@@ -11906,6 +11927,44 @@ index 0000000000000000000000000000000000000000..d3fd88a5941c5df0f1394ff317e03bcc
 +
 +
 +class InternalContractTests(unittest.TestCase):
++    def test_jwt_secret_rejects_weak_or_non_ascii_values(self):
++        invalid_values = (
++            ("x" * 31, "至少"),
++            ("x" * 513, "不得超过"),
++            ("x" * 16 + " " + "x" * 16, "ASCII"),
++            ("é" * 32, "ASCII"),
++        )
++        for value, error in invalid_values:
++            with self.subTest(value_length=len(value)), patch.dict(
++                os.environ,
++                {"JWT_SECRET": value, "JWT_SECRET_FILE": ""},
++            ), self.assertRaisesRegex(RuntimeError, error):
++                authentication._load_jwt_secret()
++        with patch.dict(
++            os.environ,
++            {"JWT_SECRET": "x" * 32, "JWT_SECRET_FILE": ""},
++        ):
++            self.assertEqual(authentication._load_jwt_secret(), "x" * 32)
++        with patch.dict(
++            os.environ,
++            {"JWT_SECRET": "", "JWT_SECRET_FILE": ""},
++        ):
++            self.assertEqual(authentication._load_jwt_secret(), "")
++        with tempfile.TemporaryDirectory() as directory:
++            secret_path = Path(directory) / "jwt-secret"
++            secret_path.write_text("y" * 32 + "\n", encoding="utf-8")
++            with patch.dict(
++                os.environ,
++                {"JWT_SECRET": "too-short", "JWT_SECRET_FILE": str(secret_path)},
++            ):
++                self.assertEqual(authentication._load_jwt_secret(), "y" * 32)
++            secret_path.write_text("y" * 31, encoding="utf-8")
++            with patch.dict(
++                os.environ,
++                {"JWT_SECRET": "x" * 32, "JWT_SECRET_FILE": str(secret_path)},
++            ), self.assertRaisesRegex(RuntimeError, "至少"):
++                authentication._load_jwt_secret()
++
 +    def test_internal_service_secret_rejects_invalid_values(self):
 +        invalid_values = (
 +            ("too-short", "至少"),
@@ -11937,7 +11996,7 @@ index 0000000000000000000000000000000000000000..d3fd88a5941c5df0f1394ff317e03bcc
 +                        "EMBEDDING_API_KEY=dotenv-test-embedding-key",
 +                        "EMBEDDING_API_BASE=https://embedding.example.invalid/v1",
 +                        "MEM0_TELEMETRY=true",
-+                        "JWT_SECRET=dotenv-test-jwt-secret",
++                        "JWT_SECRET=dotenv-test-jwt-secret-32-bytes!!",
 +                        "ADMIN_API_KEY=dotenv-test-admin-key",
 +                        "AUTH_DISABLED=true",
 +                    )
@@ -11993,7 +12052,7 @@ index 0000000000000000000000000000000000000000..d3fd88a5941c5df0f1394ff317e03bcc
 +                    "db_host": "dotenv-postgres.internal",
 +                    "config_host": "dotenv-postgres.internal",
 +                    "telemetry": True,
-+                    "jwt": "dotenv-test-jwt-secret",
++                    "jwt": "dotenv-test-jwt-secret-32-bytes!!",
 +                    "admin_key": "dotenv-test-admin-key",
 +                    "auth_disabled": True,
 +                },
@@ -12102,6 +12161,36 @@ index 0000000000000000000000000000000000000000..d3fd88a5941c5df0f1394ff317e03bcc
 +            with self.subTest(value=value), self.assertRaises(HTTPException) as raised:
 +                main._validate_internal_filter(value)
 +            self.assertEqual(raised.exception.status_code, 400)
++
++    def test_internal_filter_comparisons_preserve_json_boolean_types(self):
++        comparisons = (
++            (True, 1, False),
++            (True, {"eq": 1}, False),
++            (1, {"eq": True}, False),
++            (True, {"ne": 1}, True),
++            (1, {"ne": True}, True),
++            (True, {"in": [1]}, False),
++            (1, {"in": [True]}, False),
++            (True, {"nin": [1]}, True),
++            (1, {"nin": [True]}, True),
++            ([True], {"contains": 1}, False),
++            ([1], {"contains": True}, False),
++            ([True], {"icontains": 1}, False),
++            ([1], {"icontains": True}, False),
++            (True, {"gt": 0}, False),
++            (True, {"gte": 0}, False),
++            (True, {"lt": 2}, False),
++            (True, {"lte": 2}, False),
++            (1, {"gt": False}, False),
++            (1, {"gte": False}, False),
++            (1, {"lt": True}, False),
++            (1, {"lte": True}, False),
++        )
++        for actual, condition, expected in comparisons:
++            with self.subTest(actual=actual, condition=condition):
++                self.assertIs(main._compare_filter(actual, condition), expected)
++        self.assertTrue(main._compare_filter(True, {"eq": True}))
++        self.assertTrue(main._compare_filter(1, {"eq": 1.0}))
 +
 +    def test_internal_add_rejects_identity_overrides(self):
 +        with self.assertRaises(ValueError):
