@@ -53,6 +53,7 @@ MAX_TRANSCRIPT_BYTES = 6_000_000
 MAX_IMPORT_FILE_SIZE = 100_000
 MAX_IMPORT_CHUNK_SIZE = 10_000
 MIN_IMPORT_CHUNK_SIZE = 50
+IMPORT_SEARCH_BATCH_SIZE = 20
 IMPORT_FORMAT_VERSION = 3
 SCHEMA_SNAPSHOT_PATH = PLUGIN_ROOT / "mcp-schema.snapshot.json"
 TARGET_PROJECT_FILES = ("CLAUDE.md", "AGENTS.md", ".cursorrules", ".windsurfrules", "mem0.md")
@@ -1594,7 +1595,7 @@ def find_import_memories(
                 + (f" 导入格式 {format_version}" if format_version is not None else "")
             ),
             "project_id": project_id,
-            "top_k": 50,
+            "top_k": IMPORT_SEARCH_BATCH_SIZE,
             "threshold": 0.0,
         },
     )
@@ -1673,6 +1674,44 @@ def try_find_import_memory_ids(
     if memories is None:
         return None
     return [memory_id for memory_id, _ in memories]
+
+
+def delete_import_memories(
+    filename: str,
+    file_hash: str,
+    project_id: str,
+    format_version: int | None = IMPORT_FORMAT_VERSION,
+    exclude_ids: list[str] | None = None,
+    progress: Callable[[list[str]], None] | None = None,
+) -> bool:
+    """分批搜索并删除精确匹配的导入记忆，直到远端结果收敛。"""
+    excluded = set(exclude_ids or [])
+    seen_batches: set[tuple[str, ...]] = set()
+    while hook_budget_available(HOOK_CLEANUP_RESERVE + 0.1):
+        found_ids = try_find_import_memory_ids(
+            filename,
+            file_hash,
+            project_id,
+            format_version=format_version,
+        )
+        if found_ids is None:
+            return False
+        memory_ids = list(
+            dict.fromkeys(memory_id for memory_id in found_ids if memory_id not in excluded)
+        )
+        if not memory_ids:
+            return True
+        batch = tuple(memory_ids)
+        if batch in seen_batches:
+            log_error("自动导入清理搜索结果未能收敛")
+            return False
+        seen_batches.add(batch)
+        if progress is not None:
+            progress(memory_ids)
+        if not delete_memories(memory_ids, project_id, progress=progress):
+            return False
+    log_error("自动导入清理达到 Hook 总时间预算")
+    return False
 
 
 def add_import_chunk(text: str, project_id: str) -> None:
@@ -1863,28 +1902,11 @@ def _auto_import_project_files(cwd: str | None, project_id: str) -> None:
                 not isinstance(previous, dict) or not previous or bool(cleanup_targets)
             )
             for old_hash, old_format, field in cleanup_targets:
-                found_ids = try_find_import_memory_ids(
+                if not delete_import_memories(
                     filename,
                     old_hash,
                     project_id,
                     format_version=old_format if isinstance(old_format, int) else None,
-                )
-                if found_ids is None:
-                    cleanup_succeeded = False
-                    continue
-                old_ids = list(dict.fromkeys(found_ids))
-                if not old_ids:
-                    continue
-                save_import_id_progress(
-                    scope,
-                    scope_state,
-                    filename,
-                    field,
-                    old_ids,
-                )
-                if not delete_memories(
-                    old_ids,
-                    project_id,
                     progress=lambda remaining, field=field, filename=filename: save_import_id_progress(
                         scope,
                         scope_state,
@@ -1924,43 +1946,32 @@ def _auto_import_project_files(cwd: str | None, project_id: str) -> None:
                 if previous.get("memory_ids") != complete_ids:
                     previous["memory_ids"] = complete_ids
                     save_import_scope_state(scope, scope_state)
-                if extra_ids and not delete_memories(extra_ids, project_id):
+                if extra_ids and not delete_import_memories(
+                    filename,
+                    file_hash,
+                    project_id,
+                    exclude_ids=complete_ids,
+                ):
                     continue
-                if isinstance(fallback_hash, str) and fallback_hash:
-                    found_old_ids = try_find_import_memory_ids(
+                if (
+                    isinstance(fallback_hash, str)
+                    and fallback_hash
+                    and not delete_import_memories(
                         filename,
                         fallback_hash,
                         project_id,
                         format_version=fallback_format if isinstance(fallback_format, int) else None,
-                    )
-                    if found_old_ids is None:
-                        continue
-                    found_old_ids = [
-                        memory_id
-                        for memory_id in found_old_ids
-                        if memory_id not in complete_ids
-                    ]
-                    old_ids = list(dict.fromkeys(found_old_ids))
-                    if old_ids:
-                        save_import_id_progress(
+                        exclude_ids=complete_ids,
+                        progress=lambda remaining, filename=filename: save_import_id_progress(
                             scope,
                             scope_state,
                             filename,
                             "previous_memory_ids",
-                            old_ids,
-                        )
-                        if not delete_memories(
-                            old_ids,
-                            project_id,
-                            progress=lambda remaining, filename=filename: save_import_id_progress(
-                                scope,
-                                scope_state,
-                                filename,
-                                "previous_memory_ids",
-                                remaining,
-                            ),
-                        ):
-                            continue
+                            remaining,
+                        ),
+                    )
+                ):
+                    continue
                 if previous.get("memory_ids") != complete_ids or previous.get("pending"):
                     previous["memory_ids"] = complete_ids
                     previous.pop("pending", None)
@@ -1969,16 +1980,9 @@ def _auto_import_project_files(cwd: str | None, project_id: str) -> None:
                     previous.pop("previous_memory_ids", None)
                     changed = True
                 continue
-            if existing_ids:
-                save_import_id_progress(
-                    scope,
-                    scope_state,
-                    filename,
-                    "memory_ids",
-                    existing_ids,
-                )
-            if not delete_memories(
-                existing_ids,
+            if not delete_import_memories(
+                filename,
+                file_hash,
                 project_id,
                 progress=lambda remaining, filename=filename: save_import_id_progress(
                     scope,
@@ -1995,26 +1999,11 @@ def _auto_import_project_files(cwd: str | None, project_id: str) -> None:
                 cleanup_ids = list(fallback_ids)
         else:
             if pending and isinstance(previous_hash, str) and previous_hash:
-                found_staged_ids = try_find_import_memory_ids(
+                if not delete_import_memories(
                     filename,
                     previous_hash,
                     project_id,
                     format_version=previous_format if isinstance(previous_format, int) else None,
-                )
-                if found_staged_ids is None:
-                    continue
-                staged_ids = list(dict.fromkeys(found_staged_ids))
-                if staged_ids:
-                    save_import_id_progress(
-                        scope,
-                        scope_state,
-                        filename,
-                        "memory_ids",
-                        staged_ids,
-                    )
-                if not delete_memories(
-                    staged_ids,
-                    project_id,
                     progress=lambda remaining, filename=filename: save_import_id_progress(
                         scope,
                         scope_state,
@@ -2043,36 +2032,24 @@ def _auto_import_project_files(cwd: str | None, project_id: str) -> None:
                     cleanup_ids = list(dict.fromkeys(old_ids))
         content = redact_sensitive(raw.decode("utf-8", errors="replace"))
         chunks = split_import_content(content, filename.lower().endswith(".md"))
-        if not chunks and cleanup_hash:
-            found_old_ids = try_find_import_memory_ids(
+        if (
+            not chunks
+            and cleanup_hash
+            and not delete_import_memories(
                 filename,
                 cleanup_hash,
                 project_id,
                 format_version=cleanup_format,
-            )
-            if found_old_ids is None:
-                continue
-            old_ids = list(dict.fromkeys(found_old_ids))
-            if old_ids:
-                save_import_id_progress(
+                progress=lambda remaining, filename=filename: save_import_id_progress(
                     scope,
                     scope_state,
                     filename,
                     "memory_ids",
-                    old_ids,
-                )
-                if not delete_memories(
-                    old_ids,
-                    project_id,
-                    progress=lambda remaining, filename=filename: save_import_id_progress(
-                        scope,
-                        scope_state,
-                        filename,
-                        "memory_ids",
-                        remaining,
-                    ),
-                ):
-                    continue
+                    remaining,
+                ),
+            )
+        ):
+            continue
         if not chunks:
             if filename in scope_state:
                 scope_state.pop(filename, None)
@@ -2131,41 +2108,31 @@ def _auto_import_project_files(cwd: str | None, project_id: str) -> None:
         extra_ids = [memory_id for memory_id in all_new_ids if memory_id not in new_ids]
         scope_state[filename]["memory_ids"] = new_ids
         save_import_scope_state(scope, scope_state)
-        if extra_ids and not delete_memories(extra_ids, project_id):
+        if extra_ids and not delete_import_memories(
+            filename,
+            file_hash,
+            project_id,
+            exclude_ids=new_ids,
+        ):
             continue
-        if cleanup_hash:
-            found_old_ids = try_find_import_memory_ids(
+        if (
+            cleanup_hash
+            and not delete_import_memories(
                 filename,
                 cleanup_hash,
                 project_id,
                 format_version=cleanup_format,
-            )
-            if found_old_ids is None:
-                continue
-            found_old_ids = [
-                memory_id for memory_id in found_old_ids if memory_id not in new_ids
-            ]
-            old_ids = list(dict.fromkeys(found_old_ids))
-            if old_ids:
-                save_import_id_progress(
+                exclude_ids=new_ids,
+                progress=lambda remaining, filename=filename: save_import_id_progress(
                     scope,
                     scope_state,
                     filename,
                     "previous_memory_ids",
-                    old_ids,
-                )
-                if not delete_memories(
-                    old_ids,
-                    project_id,
-                    progress=lambda remaining, filename=filename: save_import_id_progress(
-                        scope,
-                        scope_state,
-                        filename,
-                        "previous_memory_ids",
-                        remaining,
-                    ),
-                ):
-                    continue
+                    remaining,
+                ),
+            )
+        ):
+            continue
         scope_state[filename] = {
             "sha256": file_hash,
             "format_version": IMPORT_FORMAT_VERSION,

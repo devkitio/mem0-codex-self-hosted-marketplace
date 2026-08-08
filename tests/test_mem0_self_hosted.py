@@ -821,6 +821,88 @@ class Mem0SelfHostedTests(unittest.TestCase):
             self.assertNotIn("current-b", memories)
             self.assertIn("foreign-2", memories)
 
+    def test_自动导入分批清理会保留已验证分块(self):
+        file_hash = "current-hash"
+        header = (
+            "[mem0:auto-import]\n项目：demo-project\n来源文件：AGENTS.md\n"
+            f"内容哈希：{file_hash}\n导入格式：{mem0.IMPORT_FORMAT_VERSION}\n"
+        )
+        canonical_ids = ["current-1", "current-2"]
+        memories = {
+            "current-1": f"{header}分块：1/2\n\n当前第一块",
+            "current-2": f"{header}分块：2/2\n\n当前第二块",
+            **{
+                f"extra-{index}": f"{header}分块：1/2\n\n重复块 {index}"
+                for index in range(1, 26)
+            },
+        }
+        delete_calls: list[str] = []
+        search_count = 0
+
+        def fake_call(name, arguments):
+            nonlocal search_count
+            if name == "search_memories":
+                search_count += 1
+                batch = list(memories.items())[: mem0.IMPORT_SEARCH_BATCH_SIZE]
+                return {
+                    "structuredContent": {
+                        "results": [
+                            {"id": memory_id, "memory": text}
+                            for memory_id, text in batch
+                        ]
+                    }
+                }
+            if name == "delete_memory":
+                memory_id = arguments["memory_id"]
+                delete_calls.append(memory_id)
+                memories.pop(memory_id)
+            return {}
+
+        with mock.patch.object(mem0, "call_tool", side_effect=fake_call):
+            succeeded = mem0.delete_import_memories(
+                "AGENTS.md",
+                file_hash,
+                "demo-project",
+                exclude_ids=canonical_ids,
+            )
+
+        self.assertTrue(succeeded)
+        self.assertEqual(set(memories), set(canonical_ids))
+        self.assertEqual(set(delete_calls), {f"extra-{index}" for index in range(1, 26)})
+        self.assertGreaterEqual(search_count, 3)
+
+    def test_自动导入清理遇到固定搜索批次会安全停止(self):
+        memory = (
+            "[mem0:auto-import]\n项目：demo-project\n来源文件：AGENTS.md\n"
+            f"内容哈希：fixed-hash\n导入格式：{mem0.IMPORT_FORMAT_VERSION}\n"
+            "分块：1/1\n\n固定结果"
+        )
+        delete_calls: list[str] = []
+
+        def fake_call(name, arguments):
+            if name == "search_memories":
+                return {
+                    "structuredContent": {
+                        "results": [{"id": "fixed-1", "memory": memory}]
+                    }
+                }
+            if name == "delete_memory":
+                delete_calls.append(arguments["memory_id"])
+            return {}
+
+        with mock.patch.object(mem0, "call_tool", side_effect=fake_call), mock.patch.object(
+            mem0, "log_error"
+        ) as log:
+            succeeded = mem0.delete_import_memories(
+                "AGENTS.md",
+                "fixed-hash",
+                "demo-project",
+            )
+
+        self.assertFalse(succeeded)
+        self.assertEqual(delete_calls, ["fixed-1"])
+        log.assert_called_with("自动导入清理搜索结果未能收敛")
+
     def test_自动导入部分清理会持久化剩余旧ID(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -992,7 +1074,7 @@ class Mem0SelfHostedTests(unittest.TestCase):
             self.assertEqual(delete_calls, [])
             self.assertNotIn("AGENTS.md", state.get(scope, {}))
 
-    def test_项目文件变得过大后会安全清理旧导入(self):
+    def test_项目文件变得过大后会分批清理全部旧导入(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             data = root / "plugin-data"
@@ -1000,6 +1082,7 @@ class Mem0SelfHostedTests(unittest.TestCase):
             agents.write_text("## 规则\n" + "必须保持规则最新。\n" * 20, encoding="utf-8")
             memories: dict[str, str] = {}
             delete_calls: list[str] = []
+            search_calls: list[dict] = []
             next_id = 0
 
             def fake_call(name, arguments):
@@ -1009,11 +1092,13 @@ class Mem0SelfHostedTests(unittest.TestCase):
                     memories[f"m-{next_id}"] = arguments["text"]
                     return {}
                 if name == "search_memories":
+                    search_calls.append(arguments)
+                    batch = list(memories.items())[: mem0.IMPORT_SEARCH_BATCH_SIZE]
                     return {
                         "structuredContent": {
                             "results": [
                                 {"id": memory_id, "memory": text}
-                                for memory_id, text in memories.items()
+                                for memory_id, text in batch
                             ]
                         }
                     }
@@ -1034,15 +1119,26 @@ class Mem0SelfHostedTests(unittest.TestCase):
                 imported_id = state[scope]["AGENTS.md"]["memory_ids"][0]
                 state[scope]["AGENTS.md"]["memory_ids"].append("state-only-id")
                 mem0.atomic_write_json(data / "auto_import_state.json", state)
+                imported_text = memories[imported_id]
+                foreign_text = imported_text.replace("项目：demo-project", "项目：other-project")
+                memories["foreign-1"] = foreign_text
+                for index in range(2, 27):
+                    memories[f"m-{index}"] = imported_text
 
                 agents.write_bytes(b"x" * (mem0.MAX_IMPORT_FILE_SIZE + 1))
                 mem0.auto_import_project_files(str(root), "demo-project")
 
             state = mem0.load_json_file(data / "auto_import_state.json", {})
-            self.assertEqual(delete_calls, [imported_id])
+            self.assertEqual(set(delete_calls), {f"m-{index}" for index in range(1, 27)})
+            self.assertEqual(len(delete_calls), 26)
             self.assertNotIn("state-only-id", delete_calls)
-            self.assertEqual(memories, {})
+            self.assertNotIn("foreign-1", delete_calls)
+            self.assertEqual(memories, {"foreign-1": foreign_text})
             self.assertNotIn("AGENTS.md", state.get(scope, {}))
+            self.assertGreaterEqual(len(search_calls), 4)
+            self.assertTrue(
+                all(call["top_k"] == mem0.IMPORT_SEARCH_BATCH_SIZE for call in search_calls)
+            )
 
     def test_未变化的完整导入不会重写状态(self):
         with tempfile.TemporaryDirectory() as directory:
