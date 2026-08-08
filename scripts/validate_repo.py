@@ -360,9 +360,9 @@ def main() -> None:
         assert expected in workflow, f"CI 缺少 Mem0 生产门禁：{expected}"
     for action_sha in (
         "actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38",
-        "docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130",
-        "docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f",
-        "docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8",
+        "docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8",
+        "docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c",
+        "docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a",
     ):
         assert action_sha in workflow, f"CI Action 未固定到审查 SHA：{action_sha}"
     root_gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
