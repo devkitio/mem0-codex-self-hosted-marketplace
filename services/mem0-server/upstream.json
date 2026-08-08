@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "repository": "https://github.com/mem0ai/mem0.git",
+  "commit": "50bdaaea0c02744720ed374d88584fd01494eeb7",
+  "patch": "mem0-production.patch",
+  "patch_sha256": "39e7c3784008d4ab9df6b8831c4ba634b94b585f622d8d2355a477816f29f1e8"
+}

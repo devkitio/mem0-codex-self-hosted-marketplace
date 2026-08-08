@@ -4,15 +4,18 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
 import re
 import sys
-from pathlib import Path
-
+from pathlib import Path, PurePosixPath
 
 ROOT = Path(__file__).resolve().parent.parent
 PLUGIN = ROOT / "plugins" / "mem0"
 MCP_ADAPTER = ROOT / "services" / "mem0-mcp"
+MEM0_SERVER = ROOT / "services" / "mem0-server"
+GIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 MEM0_TOOLS = {
     "add_memory",
     "search_memories",
@@ -182,6 +185,28 @@ def main() -> None:
         for path in skill_dirs
     )
     assert "page_size=200" not in skill_text, "技能仍请求超过服务端上限的单页大小"
+    reserved_metadata = {
+        "user_id",
+        "agent_id",
+        "app_id",
+        "mcp_owner",
+        "scope",
+        "project_id",
+        "source",
+        "run_id",
+    }
+    for skill_name in ("dream", "pin"):
+        text = (PLUGIN / "skills" / skill_name / "SKILL.md").read_text(encoding="utf-8")
+        assert all(name in text for name in reserved_metadata), (
+            f"{skill_name} 技能没有完整剔除保留 metadata"
+        )
+    export_skill = (PLUGIN / "skills" / "export" / "SKILL.md").read_text(encoding="utf-8")
+    import_skill = (PLUGIN / "skills" / "import" / "SKILL.md").read_text(encoding="utf-8")
+    for text in (export_skill, import_skill):
+        assert "mem0-self-hosted-export-v1" in text, "导入导出技能格式不一致"
+        assert all(name in text for name in ("metadata", "run_id", "expiration_date")), (
+            "导入导出技能缺少可迁移字段"
+        )
     health_skill = (PLUGIN / "skills" / "health" / "SKILL.md").read_text(encoding="utf-8")
     assert "../../scripts/mem0_self_hosted.py" in health_skill, "健康检查脚本路径无效"
     switch_skill = (PLUGIN / "skills" / "switch-project" / "SKILL.md").read_text(
@@ -194,8 +219,24 @@ def main() -> None:
     workflow = (ROOT / ".github" / "workflows" / "validate.yml").read_text(encoding="utf-8")
     for runner in ("ubuntu-latest", "windows-latest", "macos-latest"):
         assert runner in workflow, f"CI 缺少 {runner} 验证"
-    for name in ("server.py", "test_adapter.py", "Dockerfile", "requirements.lock"):
+    for name in (
+        "server.py",
+        "test_adapter.py",
+        "Dockerfile",
+        "requirements.in",
+        "requirements.lock",
+    ):
         assert (MCP_ADAPTER / name).is_file(), f"仓库缺少 MCP Adapter 文件：{name}"
+    adapter_requirements = (MCP_ADAPTER / "requirements.in").read_text(encoding="utf-8")
+    adapter_lock = (MCP_ADAPTER / "requirements.lock").read_text(encoding="utf-8")
+    adapter_dockerfile = (MCP_ADAPTER / "Dockerfile").read_text(encoding="utf-8")
+    adapter_dockerignore = (MCP_ADAPTER / ".dockerignore").read_text(encoding="utf-8")
+    assert "--require-hashes" in adapter_dockerfile, "Adapter 镜像未强制校验依赖哈希"
+    assert "--require-hashes" in workflow, "CI 未强制校验 Adapter 依赖哈希"
+    assert "--hash=sha256:" in adapter_lock, "Adapter 锁文件缺少依赖哈希"
+    assert "secrets/" in adapter_dockerignore.splitlines(), "Adapter 构建上下文未排除 secrets 目录"
+    for requirement in ("httpx", "mcp", "PyJWT", "uvicorn[standard]"):
+        assert requirement in adapter_requirements, f"Adapter 直接依赖清单缺少 {requirement}"
     adapter_source = (MCP_ADAPTER / "server.py").read_text(encoding="utf-8")
     ast.parse(adapter_source)
     assert '"/auth/introspect"' in adapter_source, "Adapter 未使用 MCP Key 内省接口"
@@ -204,6 +245,126 @@ def main() -> None:
     assert '"/search"' not in adapter_source, "Adapter 仍调用公开搜索接口"
     assert "get_access_token" not in adapter_source, "Adapter 仍可能转发客户端 Key"
     assert "services/mem0-mcp/requirements.lock" in workflow, "CI 未验证 MCP Adapter"
+
+    upstream_manifest_path = MEM0_SERVER / "upstream.json"
+    materializer_path = ROOT / "scripts" / "materialize_mem0.py"
+    assert upstream_manifest_path.is_file(), "仓库缺少 Mem0 上游清单"
+    assert materializer_path.is_file(), "仓库缺少 Mem0 物化脚本"
+    upstream = load_json(upstream_manifest_path)
+    assert upstream.get("schema_version") == 1, "Mem0 上游清单版本无效"
+    assert upstream.get("repository") == "https://github.com/mem0ai/mem0.git", (
+        "Mem0 上游仓库不在允许范围内"
+    )
+    commit = upstream.get("commit")
+    patch_name = upstream.get("patch")
+    expected_patch_hash = upstream.get("patch_sha256")
+    assert isinstance(commit, str) and GIT_SHA_RE.fullmatch(commit), "Mem0 上游提交必须是完整 SHA"
+    assert isinstance(patch_name, str) and PurePosixPath(patch_name).name == patch_name, (
+        "Mem0 补丁路径必须是清单同目录下的文件名"
+    )
+    assert isinstance(expected_patch_hash, str) and SHA256_RE.fullmatch(expected_patch_hash), (
+        "Mem0 补丁哈希格式无效"
+    )
+    patch_path = MEM0_SERVER / patch_name
+    assert patch_path.is_file(), "Mem0 生产补丁不存在"
+    patch_bytes = patch_path.read_bytes()
+    assert hashlib.sha256(patch_bytes).hexdigest() == expected_patch_hash, (
+        "Mem0 生产补丁哈希不匹配"
+    )
+    patch_text = patch_bytes.decode("utf-8")
+    patch_paths = re.findall(r"^diff --git a/(.+) b/(.+)$", patch_text, re.MULTILINE)
+    assert patch_paths, "Mem0 生产补丁没有文件变更"
+    assert not any(line.startswith(" ") for line in patch_text.splitlines()), (
+        "Mem0 生产补丁不得携带未修改的上游上下文"
+    )
+    for old_path, new_path in patch_paths:
+        assert old_path == new_path, "Mem0 生产补丁不得包含重命名"
+        path = PurePosixPath(old_path)
+        assert not path.is_absolute() and ".." not in path.parts, "Mem0 生产补丁包含越界路径"
+        assert old_path in {
+            ".dockerignore",
+            ".gitignore",
+            "mem0/vector_stores/pgvector.py",
+            "tests/vector_stores/test_pgvector.py",
+        } or old_path.startswith(("server/", "openresty/")), (
+            f"Mem0 生产补丁修改了未授权路径：{old_path}"
+        )
+    required_patch_paths = {
+        "openresty/api-proxy.conf",
+        "openresty/dashboard-proxy.conf",
+        "openresty/mcp.conf",
+        "server/alembic/versions/007_mcp_deletion_operations.py",
+        "server/alembic/versions/008_api_key_purpose.py",
+        "server/config.py",
+        "server/mcp_scope.py",
+        "server/prod.Dockerfile",
+        "server/requirements.lock",
+        "server/scripts/backfill_mcp_scope.py",
+        "server/test_main.py",
+    }
+    assert required_patch_paths <= {path for _, path in patch_paths}, (
+        "Mem0 生产补丁缺少关键新增文件"
+    )
+    assert "120000" not in patch_text, "Mem0 生产补丁不得创建符号链接"
+    for expected in (
+        "MEM0_MCP_ROOT:-/data/mem0Mcp",
+        "mcp_confirmation_secret",
+        "mem0_internal_service_key",
+        "server/secrets",
+    ):
+        assert expected in patch_text, f"Mem0 生产补丁缺少 Secret 边界：{expected}"
+    for expected in (
+        "openresty/dashboard-proxy.conf",
+        "proxy_pass http://127.0.0.1:3111",
+        "COPY --from=builder --chown=nextjs:nodejs /app/public",
+    ):
+        assert expected in patch_text, f"Mem0 生产补丁缺少 Dashboard 部署资产：{expected}"
+
+    materializer = materializer_path.read_text(encoding="utf-8")
+    ast.parse(materializer)
+    for expected in (
+        "GIT_TERMINAL_PROMPT",
+        "--depth",
+        "--unidiff-zero",
+        "apply",
+        "--check",
+        "reconfigure",
+    ):
+        assert expected in materializer, f"Mem0 物化脚本缺少安全门禁：{expected}"
+    for expected in (
+        "scripts/materialize_mem0.py",
+        ".mem0-source/server/requirements.lock",
+        "alembic downgrade 006",
+        "verify-pgvector-filter-integration",
+        "verify-backfill-integration",
+        "prepare-restart",
+        "verify-restart",
+        "node-version: \"22\"",
+        "pnpm install --frozen-lockfile",
+        "pnpm run typecheck",
+        "pnpm run build",
+        "pnpm audit --prod --audit-level=high",
+        'docker exec "$container" wget',
+        "platforms: linux/arm64",
+    ):
+        assert expected in workflow, f"CI 缺少 Mem0 生产门禁：{expected}"
+    for action_sha in (
+        "actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38",
+        "docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130",
+        "docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f",
+        "docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8",
+    ):
+        assert action_sha in workflow, f"CI Action 未固定到审查 SHA：{action_sha}"
+    root_gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
+    for ignored in (
+        "/.mem0-source/",
+        "/backups/",
+        "/runtime.env",
+        "/secrets/",
+        "/services/mem0-mcp/secrets/",
+    ):
+        assert ignored in root_gitignore, f"仓库未忽略运行时敏感路径：{ignored}"
+
     runtime_contract = (PLUGIN / "SELF_HOSTED_RUNTIME.md").read_text(encoding="utf-8")
     assert "/auth/introspect" in runtime_contract and "用途为 MCP" in runtime_contract, (
         "运行时约定缺少 MCP 专用 Key 边界"

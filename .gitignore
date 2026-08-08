@@ -8,3 +8,8 @@ Thumbs.db
 .omo/
 .test-tmp/
 .tmp_unittest/
+/.mem0-source/
+/backups/
+/runtime.env
+/secrets/
+/services/mem0-mcp/secrets/
