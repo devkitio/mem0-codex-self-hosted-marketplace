@@ -8340,7 +8340,7 @@ index 14d0907bc4d49850eadbf96f64a214e3324cb2b0..3b8ded79f615b09fdd335c2a84b6971f
 -    logging.exception("Upstream provider error (code=%s)", code)
 +    logging.error("上游服务错误（code=%s，exception_type=%s）", code, type(exc).__name__ if exc else "unknown")
 diff --git a/server/main.py b/server/main.py
-index 20059fb8ed6075f7371f89215cb7990d8566a066..8101c21062ccf8efd079c52c7900266b68e471ca 100644
+index 20059fb8ed6075f7371f89215cb7990d8566a066..1963be6fd194b32f8e8aa41088716d1c1ed39669 100644
 --- a/server/main.py
 +++ b/server/main.py
 @@ -1,0 +2,3 @@ import asyncio
@@ -8402,7 +8402,7 @@ index 20059fb8ed6075f7371f89215cb7990d8566a066..8101c21062ccf8efd079c52c7900266b
 +PROJECT_ID_PATTERN = r"^[A-Za-z0-9._-]{1,64}$"
 +ENTITY_ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
 +HASH_PATTERN = r"^[0-9a-f]{64}$"
-@@ -108,31 +142,20 @@ telemetry.log_status()
+@@ -108,32 +142,20 @@ telemetry.log_status()
 -POSTGRES_HOST = os.environ.get("POSTGRES_HOST", "postgres")
 -POSTGRES_PORT = os.environ.get("POSTGRES_PORT", "5432")
 -POSTGRES_DB = os.environ.get("POSTGRES_DB", "postgres")
@@ -8434,7 +8434,8 @@ index 20059fb8ed6075f7371f89215cb7990d8566a066..8101c21062ccf8efd079c52c7900266b
 -    },
 -    "embedder": {"provider": "openai", "config": {"api_key": OPENAI_API_KEY, "model": DEFAULT_EMBEDDER_MODEL}},
 -    "history_db_path": HISTORY_DB_PATH,
-+def _secret(name: str) -> str:
+-}
++def _secret(name: str, minimum_length: int = 0, maximum_length: int = 512) -> str:
 +    file_value = os.environ.get(f"{name}_FILE", "").strip()
 +    if file_value:
 +        try:
@@ -8443,19 +8444,26 @@ index 20059fb8ed6075f7371f89215cb7990d8566a066..8101c21062ccf8efd079c52c7900266b
 +            raise RuntimeError(f"无法读取 {name} 的 secret 文件") from exc
 +        if len(value) > 8192:
 +            raise RuntimeError(f"{name} 的 secret 文件超过大小限制")
-+        return value.strip()
-+    return os.environ.get(name, "").strip()
++        value = value.strip()
++    else:
++        value = os.environ.get(name, "").strip()
++    if len(value) > maximum_length:
++        raise RuntimeError(f"{name} 不得超过 {maximum_length} 个字符")
++    if value and len(value) < minimum_length:
++        raise RuntimeError(f"{name} 必须至少包含 {minimum_length} 个字符")
++    if value and any(not 33 <= ord(character) <= 126 for character in value):
++        raise RuntimeError(f"{name} 必须仅包含可见 ASCII 字符")
++    return value
 +
-+
-+INTERNAL_SERVICE_KEY = _secret("MEM0_INTERNAL_SERVICE_KEY")
+@@ -140,0 +163,19 @@ DEFAULT_CONFIG = {
++INTERNAL_SERVICE_KEY = _secret("MEM0_INTERNAL_SERVICE_KEY", minimum_length=32)
 +INTERNAL_USER_ID = os.environ.get("MEM0_INTERNAL_USER_ID", "codex-primary")
 +INTERNAL_OWNER = os.environ.get("MEM0_INTERNAL_OWNER", "codex-primary-adapter")
 +INTERNAL_ALLOWED_HOSTS = {
 +    host.strip().lower()
 +    for host in os.environ.get("MEM0_INTERNAL_ALLOWED_HOSTS", "mem0,mem0-rest-candidate,127.0.0.1,localhost").split(",")
 +    if host.strip()
-@@ -140 +163,11 @@ DEFAULT_CONFIG = {
--
++}
 +INTERNAL_SCAN_LIMIT = int(os.environ.get("MEM0_INTERNAL_SCAN_LIMIT", "5000"))
 +MCP_DELETE_LEASE_SECONDS = max(30, min(int(os.environ.get("MEM0_MCP_DELETE_LEASE_SECONDS", "120")), 600))
 +MCP_DELETE_BATCH_SIZE = max(1, min(int(os.environ.get("MEM0_MCP_DELETE_BATCH_SIZE", "25")), 100))
@@ -8467,10 +8475,10 @@ index 20059fb8ed6075f7371f89215cb7990d8566a066..8101c21062ccf8efd079c52c7900266b
 +_READINESS_LOCK = threading.Lock()
 +_READINESS_CHECKED_AT = 0.0
 +_READINESS_OK = False
-@@ -143 +176 @@ set_session_factory(SessionLocal)
+@@ -143 +184 @@ set_session_factory(SessionLocal)
 -initialize_state(DEFAULT_CONFIG)
 +initialize_state(CUSTOM_CONFIG)
-@@ -179,0 +213,7 @@ class Message(BaseModel):
+@@ -179,0 +221,7 @@ class Message(BaseModel):
 +class InternalMessage(BaseModel):
 +    role: Literal["user", "assistant", "system"]
 +    content: str = Field(..., min_length=1, max_length=50000)
@@ -8478,9 +8486,9 @@ index 20059fb8ed6075f7371f89215cb7990d8566a066..8101c21062ccf8efd079c52c7900266b
 +    model_config = {"extra": "forbid"}
 +
 +
-@@ -205,0 +246 @@ class SearchRequest(BaseModel):
+@@ -205,0 +254 @@ class SearchRequest(BaseModel):
 +    rerank: Optional[bool] = Field(None, description="Rerank results when a reranker is configured.")
-@@ -209,0 +251,65 @@ class SearchRequest(BaseModel):
+@@ -209,0 +259,65 @@ class SearchRequest(BaseModel):
 +class InternalMemoryQuery(BaseModel):
 +    project_id: Optional[str] = Field(None, pattern=PROJECT_ID_PATTERN)
 +    include_global: bool = False
@@ -8546,7 +8554,7 @@ index 20059fb8ed6075f7371f89215cb7990d8566a066..8101c21062ccf8efd079c52c7900266b
 +    operation_expires_at: int = Field(..., ge=0, le=4102444800)
 +
 +
-@@ -217,3 +323,5 @@ def _client_error(exc: Exception) -> HTTPException:
+@@ -217,3 +331,5 @@ def _client_error(exc: Exception) -> HTTPException:
 -    detail = str(exc)
 -    status_code = 404 if isinstance(exc, ValueError) and "not found" in detail.lower() else 400
 -    return HTTPException(status_code=status_code, detail=detail)
@@ -8555,7 +8563,7 @@ index 20059fb8ed6075f7371f89215cb7990d8566a066..8101c21062ccf8efd079c52c7900266b
 +        status_code=404 if not_found else 400,
 +        detail="请求的资源不存在" if not_found else "请求参数无效",
 +    )
-@@ -231,0 +340,737 @@ def _redact_config(value: Any, key: str | None = None) -> Any:
+@@ -231,0 +348,737 @@ def _redact_config(value: Any, key: str | None = None) -> Any:
 +_INTERNAL_FILTER_FIELDS = {"metadata", "run_id", "created_at", "updated_at", "expiration_date"}
 +_INTERNAL_FILTER_LOGICAL = {"AND", "OR", "NOT"}
 +_INTERNAL_FILTER_OPERATORS = {"eq", "ne", "in", "nin", "gt", "gte", "lt", "lte", "contains", "icontains"}
@@ -9293,13 +9301,13 @@ index 20059fb8ed6075f7371f89215cb7990d8566a066..8101c21062ccf8efd079c52c7900266b
 +    return hmac.compare_digest(_memory_version(item), expected_version)
 +
 +
-@@ -287 +1132 @@ def _persist_request_log(method: str, path: str, status_code: int, latency_ms: f
+@@ -287 +1140 @@ def _persist_request_log(method: str, path: str, status_code: int, latency_ms: f
 -        logging.exception("Failed to persist request log")
 +        logging.warning("请求日志持久化失败")
-@@ -323 +1168 @@ async def log_requests(request: Request, call_next):
+@@ -323 +1176 @@ async def log_requests(request: Request, call_next):
 -def get_config(_auth=Depends(verify_auth)):
 +def get_config(_auth=Depends(require_admin)):
-@@ -326,0 +1172,49 @@ def get_config(_auth=Depends(verify_auth)):
+@@ -326,0 +1180,49 @@ def get_config(_auth=Depends(verify_auth)):
 +@app.get("/api/livez", include_in_schema=False)
 +def api_livez():
 +    return {"status": "ok"}
@@ -9349,32 +9357,32 @@ index 20059fb8ed6075f7371f89215cb7990d8566a066..8101c21062ccf8efd079c52c7900266b
 +    return _readiness_response()
 +
 +
-@@ -328 +1222 @@ def get_config(_auth=Depends(verify_auth)):
+@@ -328 +1230 @@ def get_config(_auth=Depends(verify_auth)):
 -def list_bundled_providers(_auth=Depends(verify_auth)):
 +def list_bundled_providers(_auth=Depends(require_admin)):
-@@ -341 +1235 @@ def set_config(config: Dict[str, Any], _auth=Depends(require_admin)):
+@@ -341 +1243 @@ def set_config(config: Dict[str, Any], _auth=Depends(require_admin)):
 -def generate_instructions(req: GenerateInstructionsRequest, _auth=Depends(verify_auth)):
 +def generate_instructions(req: GenerateInstructionsRequest, _auth=Depends(require_admin)):
-@@ -368 +1262 @@ def generate_instructions(req: GenerateInstructionsRequest, _auth=Depends(verify
+@@ -368 +1270 @@ def generate_instructions(req: GenerateInstructionsRequest, _auth=Depends(verify
 -def add_memory(memory_create: MemoryCreate, _auth=Depends(verify_auth)):
 +def add_memory(memory_create: MemoryCreate, _auth=Depends(require_admin)):
-@@ -419 +1313 @@ def get_all_memories(
+@@ -419 +1321 @@ def get_all_memories(
 -    _auth=Depends(verify_auth),
 +    _auth=Depends(require_admin),
-@@ -444 +1338 @@ def get_all_memories(
+@@ -444 +1346 @@ def get_all_memories(
 -def get_memory(memory_id: str, _auth=Depends(verify_auth)):
 +def get_memory(memory_id: str, _auth=Depends(require_admin)):
-@@ -447 +1341,2 @@ def get_memory(memory_id: str, _auth=Depends(verify_auth)):
+@@ -447 +1349,2 @@ def get_memory(memory_id: str, _auth=Depends(verify_auth)):
 -        return get_memory_instance().get(memory_id)
 +        with _memory_operation_lock(memory_id):
 +            return get_memory_instance().get(memory_id)
-@@ -453 +1348 @@ def get_memory(memory_id: str, _auth=Depends(verify_auth)):
+@@ -453 +1356 @@ def get_memory(memory_id: str, _auth=Depends(verify_auth)):
 -def search_memories(search_req: SearchRequest, _auth=Depends(verify_auth)):
 +def search_memories(search_req: SearchRequest, _auth=Depends(require_admin)):
-@@ -473,0 +1369,2 @@ def search_memories(search_req: SearchRequest, _auth=Depends(verify_auth)):
+@@ -473,0 +1377,2 @@ def search_memories(search_req: SearchRequest, _auth=Depends(verify_auth)):
 +        if search_req.rerank is not None:
 +            params["rerank"] = search_req.rerank
-@@ -478,3 +1375,7 @@ def search_memories(search_req: SearchRequest, _auth=Depends(verify_auth)):
+@@ -478,3 +1383,238 @@ def search_memories(search_req: SearchRequest, _auth=Depends(verify_auth)):
 -        return get_memory_instance().search(query=search_req.query, filters=filters, **params)
 -    except ValueError as e:
 -        raise HTTPException(status_code=400, detail=str(e))
@@ -9385,7 +9393,12 @@ index 20059fb8ed6075f7371f89215cb7990d8566a066..8101c21062ccf8efd079c52c7900266b
 +        )
 +    except (ValueError, Mem0ValidationError) as exc:
 +        raise _client_error(exc)
-@@ -486,0 +1388,325 @@ def search_memories(search_req: SearchRequest, _auth=Depends(verify_auth)):
++    except HTTPException:
++        raise
++    except Exception:
++        raise upstream_error()
++
++
 +@app.post("/internal/mcp/search", include_in_schema=False)
 +def internal_mcp_search(
 +    request: InternalMemorySearch,
@@ -9611,8 +9624,7 @@ index 20059fb8ed6075f7371f89215cb7990d8566a066..8101c21062ccf8efd079c52c7900266b
 +            if not isinstance(updated, dict) or not _matches_managed_scope(updated, request.project_id):
 +                raise RuntimeError("Mem0 更新记忆后返回无效响应")
 +            return {"memory": updated}
-+    except HTTPException:
-+        raise
+@@ -482,0 +1623,94 @@ def search_memories(search_req: SearchRequest, _auth=Depends(verify_auth)):
 +    except (ValueError, Mem0ValidationError) as exc:
 +        raise _client_error(exc)
 +    except Exception:
@@ -9707,36 +9719,32 @@ index 20059fb8ed6075f7371f89215cb7990d8566a066..8101c21062ccf8efd079c52c7900266b
 +        raise
 +    except (ValueError, Mem0ValidationError) as exc:
 +        raise _client_error(exc)
-+    except Exception:
-+        raise upstream_error()
-+
-+
-@@ -488 +1714 @@ def search_memories(search_req: SearchRequest, _auth=Depends(verify_auth)):
+@@ -488 +1722 @@ def search_memories(search_req: SearchRequest, _auth=Depends(verify_auth)):
 -def update_memory(memory_id: str, updated_memory: MemoryUpdate, _auth=Depends(verify_auth)):
 +def update_memory(memory_id: str, updated_memory: MemoryUpdate, _auth=Depends(require_admin)):
-@@ -499 +1725,4 @@ def update_memory(memory_id: str, updated_memory: MemoryUpdate, _auth=Depends(ve
+@@ -499 +1733,4 @@ def update_memory(memory_id: str, updated_memory: MemoryUpdate, _auth=Depends(ve
 -        return get_memory_instance().update(**params)
 +        with _memory_operation_lock(memory_id):
 +            return get_memory_instance().update(**params)
 +    except HTTPException:
 +        raise
-@@ -507 +1736 @@ def update_memory(memory_id: str, updated_memory: MemoryUpdate, _auth=Depends(ve
+@@ -507 +1744 @@ def update_memory(memory_id: str, updated_memory: MemoryUpdate, _auth=Depends(ve
 -def memory_history(memory_id: str, _auth=Depends(verify_auth)):
 +def memory_history(memory_id: str, _auth=Depends(require_admin)):
-@@ -510 +1739,4 @@ def memory_history(memory_id: str, _auth=Depends(verify_auth)):
+@@ -510 +1747,4 @@ def memory_history(memory_id: str, _auth=Depends(verify_auth)):
 -        return get_memory_instance().history(memory_id=memory_id)
 +        with _memory_operation_lock(memory_id):
 +            return get_memory_instance().history(memory_id=memory_id)
 +    except HTTPException:
 +        raise
-@@ -516 +1748 @@ def memory_history(memory_id: str, _auth=Depends(verify_auth)):
+@@ -516 +1756 @@ def memory_history(memory_id: str, _auth=Depends(verify_auth)):
 -def delete_memory(memory_id: str, _auth=Depends(verify_auth)):
 +def delete_memory(memory_id: str, _auth=Depends(require_admin)):
-@@ -519 +1751,2 @@ def delete_memory(memory_id: str, _auth=Depends(verify_auth)):
+@@ -519 +1759,2 @@ def delete_memory(memory_id: str, _auth=Depends(verify_auth)):
 -        get_memory_instance().delete(memory_id=memory_id)
 +        with _memory_operation_lock(memory_id):
 +            get_memory_instance().delete(memory_id=memory_id)
-@@ -520,0 +1754,2 @@ def delete_memory(memory_id: str, _auth=Depends(verify_auth)):
+@@ -520,0 +1762,2 @@ def delete_memory(memory_id: str, _auth=Depends(verify_auth)):
 +    except HTTPException:
 +        raise
 diff --git a/server/mcp_scope.py b/server/mcp_scope.py
@@ -11637,10 +11645,10 @@ index b7b882a3e2448a52ca4a6392296d2411cf91e815..f06619cc762984cb78d6c0c343a8f269
 +    logging.info("首条记忆已保存，可在控制台中查看和管理")
 diff --git a/server/test_main.py b/server/test_main.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..f968ec937a1d0d1102b8f1a7527a5007d9a8e723
+index 0000000000000000000000000000000000000000..d3fd88a5941c5df0f1394ff317e03bcc3454a4ae
 --- /dev/null
 +++ b/server/test_main.py
-@@ -0,0 +1,1211 @@
+@@ -0,0 +1,1229 @@
 +import json
 +import logging
 +import os
@@ -11898,6 +11906,24 @@ index 0000000000000000000000000000000000000000..f968ec937a1d0d1102b8f1a7527a5007
 +
 +
 +class InternalContractTests(unittest.TestCase):
++    def test_internal_service_secret_rejects_invalid_values(self):
++        invalid_values = (
++            ("too-short", "至少"),
++            ("x" * 513, "不得超过"),
++            ("é" * 32, "ASCII"),
++        )
++        for value, error in invalid_values:
++            with self.subTest(value_length=len(value)), patch.dict(
++                os.environ,
++                {"UNIT_TEST_SECRET": value, "UNIT_TEST_SECRET_FILE": ""},
++            ), self.assertRaisesRegex(RuntimeError, error):
++                main._secret("UNIT_TEST_SECRET", minimum_length=32)
++        with patch.dict(
++            os.environ,
++            {"UNIT_TEST_SECRET": "x" * 32, "UNIT_TEST_SECRET_FILE": ""},
++        ):
++            self.assertEqual(main._secret("UNIT_TEST_SECRET", minimum_length=32), "x" * 32)
++
 +    def test_dotenv在配置模块读取环境前加载(self):
 +        with tempfile.TemporaryDirectory() as directory:
 +            root = Path(directory)

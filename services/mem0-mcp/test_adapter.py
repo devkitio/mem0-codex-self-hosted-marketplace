@@ -7,8 +7,8 @@ from unittest.mock import AsyncMock, patch
 
 import httpx
 
-os.environ.setdefault("MEM0_INTERNAL_SERVICE_KEY", "test-internal-key")
-os.environ.setdefault("MCP_CONFIRMATION_SECRET", "test-confirmation-secret")
+os.environ.setdefault("MEM0_INTERNAL_SERVICE_KEY", "test-internal-service-key-0123456789")
+os.environ.setdefault("MCP_CONFIRMATION_SECRET", "test-confirmation-secret-9876543210")
 
 import server
 
@@ -18,6 +18,23 @@ TEST_UPSTREAM_FAILURE_API_KEY = "m0sk_test-upstream-failure-key-value"
 
 
 class AdapterValidationTests(unittest.TestCase):
+    def test_server_secrets_require_strength_and_separation(self):
+        invalid_values = (
+            ("too-short", "至少"),
+            ("x" * 513, "不得超过"),
+            ("é" * 32, "ASCII"),
+            ("x" * 31 + " ", "至少"),
+        )
+        for value, error in invalid_values:
+            with self.subTest(value_length=len(value)), patch.dict(
+                os.environ,
+                {"UNIT_TEST_SECRET": value, "UNIT_TEST_SECRET_FILE": ""},
+            ), self.assertRaisesRegex(RuntimeError, error):
+                server._secret("UNIT_TEST_SECRET")
+        self.assertEqual(server._secret("MEM0_INTERNAL_SERVICE_KEY"), server.INTERNAL_SERVICE_KEY)
+        with self.assertRaisesRegex(RuntimeError, "不同值"):
+            server._validate_runtime_secrets("x" * 32, "x" * 32)
+
     def test_http_client_request_logs_are_disabled(self):
         self.assertGreaterEqual(logging.getLogger("httpx").getEffectiveLevel(), logging.WARNING)
         self.assertGreaterEqual(logging.getLogger("httpcore").getEffectiveLevel(), logging.WARNING)
@@ -63,7 +80,7 @@ class AdapterValidationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "逻辑过滤"):
             server._filters(value)
 
-    def test_filter_rejects_null_and_boolean_ranges(self):
+    def test_filter_rejects_null_and_preserves_json_boolean_types(self):
         invalid_filters = (
             {"metadata": {"kind": None}},
             {"metadata": {"kind": {"eq": None}}},
@@ -73,6 +90,19 @@ class AdapterValidationTests(unittest.TestCase):
         for value in invalid_filters:
             with self.subTest(value=value), self.assertRaises(ValueError):
                 server._filters(value)
+        mismatches = (
+            (True, {"gt": 0}),
+            (1, {"gt": False}),
+            (1, {"eq": True}),
+            (True, {"eq": 1}),
+            (1, {"in": [True]}),
+            ([1], {"contains": True}),
+        )
+        for actual, condition in mismatches:
+            with self.subTest(actual=actual, condition=condition):
+                self.assertFalse(server._compare_filter(actual, condition))
+        self.assertTrue(server._compare_filter(True, {"eq": True}))
+        self.assertTrue(server._compare_filter(1, {"eq": 1.0}))
 
     def test_exact_project_visibility_does_not_include_global(self):
         global_item = {
@@ -176,9 +206,12 @@ class AdapterValidationTests(unittest.TestCase):
                 server._verify_confirmation(token, {**expected, "project_id": "project-b"})
             with self.assertRaisesRegex(ValueError, "篡改"):
                 server._verify_confirmation(token[:-1] + ("A" if token[-1] != "A" else "B"), expected)
+        for malformed in ("é.x", "e30=.x", ".x", "x."):
+            with self.subTest(malformed=malformed), self.assertRaisesRegex(ValueError, "格式无效"):
+                server._verify_confirmation(malformed, expected)
         with patch.object(server.time, "time", return_value=1000):
             token, _ = server._make_confirmation({**expected, "cutoff": "2026-08-05T00:00:00+00:00", "result_hash": "0" * 64, "count": 1})
-        with patch.object(server.time, "time", return_value=1000 + server.CONFIRMATION_TTL_SECONDS + 1):
+        with patch.object(server.time, "time", return_value=1000 + server.CONFIRMATION_TTL_SECONDS):
             with self.assertRaisesRegex(ValueError, "已过期"):
                 server._verify_confirmation(token, expected)
 
@@ -271,6 +304,13 @@ class AdapterAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(await verifier.verify_token("m0sk_test-invalid-api-key-value"))
         with self.assertRaisesRegex(RuntimeError, "上游错误"):
             await verifier.verify_token(TEST_UPSTREAM_FAILURE_API_KEY)
+        for subject in ("", "not-a-uuid", "00000000-0000-0000-0000-000000000001 "):
+            with self.subTest(subject=subject), patch.object(
+                server,
+                "_request",
+                AsyncMock(return_value={"subject": subject, "purpose": "mcp"}),
+            ), self.assertRaisesRegex(RuntimeError, "内省返回无效响应"):
+                await verifier.verify_token(TEST_API_KEY)
 
     async def test_asgi_bearer_auth_distinguishes_invalid_key_from_upstream_failure(self):
         payload = {

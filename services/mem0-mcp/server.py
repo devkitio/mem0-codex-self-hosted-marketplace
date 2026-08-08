@@ -30,7 +30,7 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 
-def _secret(name: str) -> str:
+def _secret(name: str, minimum_length: int = 32, maximum_length: int = 512) -> str:
     file_value = os.environ.get(f"{name}_FILE", "").strip()
     if file_value:
         try:
@@ -39,8 +39,23 @@ def _secret(name: str) -> str:
             raise RuntimeError(f"无法读取 {name} 的 secret 文件") from exc
         if len(value) > 8192:
             raise RuntimeError(f"{name} 的 secret 文件超过大小限制")
-        return value.strip()
-    return os.environ.get(name, "").strip()
+        value = value.strip()
+    else:
+        value = os.environ.get(name, "").strip()
+    if len(value) > maximum_length:
+        raise RuntimeError(f"{name} 不得超过 {maximum_length} 个字符")
+    if value and len(value) < minimum_length:
+        raise RuntimeError(f"{name} 必须至少包含 {minimum_length} 个字符")
+    if value and any(not 33 <= ord(character) <= 126 for character in value):
+        raise RuntimeError(f"{name} 必须仅包含可见 ASCII 字符")
+    return value
+
+
+def _validate_runtime_secrets(internal_key: str, confirmation_secret: str) -> None:
+    if not internal_key or not confirmation_secret:
+        raise RuntimeError("必须配置 MEM0_INTERNAL_SERVICE_KEY 和 MCP_CONFIRMATION_SECRET")
+    if hmac.compare_digest(internal_key.encode("utf-8"), confirmation_secret.encode("utf-8")):
+        raise RuntimeError("内部服务 Key 与删除确认 Secret 必须使用不同值")
 
 
 def _env_int(name: str, default: int, minimum: int, maximum: int) -> int:
@@ -75,6 +90,7 @@ CONFIRMATION_TTL_SECONDS = _env_int("MCP_CONFIRMATION_TTL_SECONDS", 300, 60, 900
 PROJECT_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 HASH_RE = re.compile(r"^[0-9a-f]{64}$")
+CONFIRMATION_TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$")
 RESERVED_METADATA = {"user_id", "agent_id", "app_id", "mcp_owner", "scope", "project_id", "source", "run_id"}
 MEMORY_RESPONSE_FIELDS = {
     "id",
@@ -111,8 +127,7 @@ FILTER_OPERATORS = {"eq", "ne", "in", "nin", "gt", "gte", "lt", "lte", "contains
 HTTP_CLIENT: httpx.AsyncClient | None = None
 UPSTREAM_SEMAPHORE: asyncio.Semaphore | None = None
 
-if not all((INTERNAL_SERVICE_KEY, CONFIRMATION_SECRET)):
-    raise RuntimeError("MEM0_INTERNAL_SERVICE_KEY and MCP_CONFIRMATION_SECRET are required")
+_validate_runtime_secrets(INTERNAL_SERVICE_KEY, CONFIRMATION_SECRET)
 
 
 class InvalidMem0APIKey(ValueError):
@@ -158,14 +173,17 @@ class Mem0APIKeyVerifier:
             )
         except InvalidMem0APIKey:
             return None
+        subject_value = result.get("subject") if isinstance(result, dict) else None
+        try:
+            subject = str(uuid.UUID(subject_value))
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise RuntimeError("Mem0 API Key 内省返回无效响应") from exc
         if (
             not isinstance(result, dict)
             or result.get("purpose") != "mcp"
-            or not isinstance(result.get("subject"), str)
-            or not result["subject"]
+            or subject != subject_value
         ):
             raise RuntimeError("Mem0 API Key 内省返回无效响应")
-        subject = result["subject"]
         return AccessToken(
             token=token,
             client_id=f"mem0:{subject}",
@@ -450,6 +468,12 @@ def _filters(value: dict[str, Any] | None) -> dict[str, Any] | None:
 _FILTER_MISSING = object()
 
 
+def _json_equal(left: Any, right: Any) -> bool:
+    if isinstance(left, bool) or isinstance(right, bool):
+        return isinstance(left, bool) and isinstance(right, bool) and left is right
+    return left == right
+
+
 def _filter_and(values: list[bool | None]) -> bool | None:
     if any(value is False for value in values):
         return False
@@ -471,22 +495,24 @@ def _compare_filter(actual: Any, condition: Any) -> bool | None:
     if actual is _FILTER_MISSING or actual is None:
         return None
     if not isinstance(condition, dict):
-        return actual == condition
+        return _json_equal(actual, condition)
     operator, expected = next(iter(condition.items()))
     if operator == "eq":
-        return actual == expected
+        return _json_equal(actual, expected)
     if operator == "ne":
-        return actual != expected
+        return not _json_equal(actual, expected)
     if operator == "in":
-        return actual in expected
+        return any(_json_equal(actual, item) for item in expected)
     if operator == "nin":
-        return actual not in expected
+        return not any(_json_equal(actual, item) for item in expected)
     if operator in {"contains", "icontains"}:
         if isinstance(actual, list):
-            return expected in actual
+            return any(_json_equal(item, expected) for item in actual)
         if not isinstance(actual, str) or not isinstance(expected, str):
             return False
         return expected.lower() in actual.lower() if operator == "icontains" else expected in actual
+    if isinstance(actual, bool) or isinstance(expected, bool):
+        return False
     try:
         if operator == "gt":
             return actual > expected
@@ -858,7 +884,11 @@ def _make_confirmation(payload: dict[str, Any]) -> tuple[str, str]:
 
 
 def _verify_confirmation(token: str, expected: dict[str, Any]) -> dict[str, Any]:
-    if not isinstance(token, str) or len(token) > 4096 or token.count(".") != 1:
+    if (
+        not isinstance(token, str)
+        or len(token) > 4096
+        or not CONFIRMATION_TOKEN_RE.fullmatch(token)
+    ):
         raise ValueError("确认令牌格式无效")
     encoded, supplied_signature = token.split(".", 1)
     expected_signature = _token_encode(
@@ -877,7 +907,7 @@ def _verify_confirmation(token: str, expected: dict[str, Any]) -> dict[str, Any]
     except (TypeError, ValueError) as exc:
         raise ValueError("确认令牌内容无效") from exc
     now = time.time()
-    if payload["exp"] < now:
+    if payload["exp"] <= now:
         raise ValueError("确认令牌已过期")
     for key, value in expected.items():
         if payload.get(key) != value:
