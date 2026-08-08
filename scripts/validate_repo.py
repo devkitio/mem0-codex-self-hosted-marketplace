@@ -274,6 +274,15 @@ def main() -> None:
     patch_text = patch_bytes.decode("utf-8")
     patch_paths = re.findall(r"^diff --git a/(.+) b/(.+)$", patch_text, re.MULTILINE)
     assert patch_paths, "Mem0 生产补丁没有文件变更"
+    patch_indexes = re.findall(
+        r"^index ([0-9a-f]{40})\.\.([0-9a-f]{40})(?: [0-7]{6})?$",
+        patch_text,
+        re.MULTILINE,
+    )
+    assert len(patch_indexes) == len(patch_paths), "Mem0 生产补丁必须为每个文件记录完整 blob ID"
+    assert len({new_path for _, new_path in patch_paths}) == len(patch_paths), (
+        "Mem0 生产补丁包含重复文件"
+    )
     assert not any(line.startswith(" ") for line in patch_text.splitlines()), (
         "Mem0 生产补丁不得携带未修改的上游上下文"
     )
@@ -326,6 +335,7 @@ def main() -> None:
         "GIT_TERMINAL_PROMPT",
         "--depth",
         "--unidiff-zero",
+        "--index",
         "apply",
         "--check",
         "reconfigure",

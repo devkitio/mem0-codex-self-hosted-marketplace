@@ -93,6 +93,7 @@ def materialize(target: Path) -> None:
                 "git",
                 "apply",
                 "--check",
+                "--index",
                 "--unidiff-zero",
                 "--whitespace=nowarn",
                 str(patch_path),
