@@ -828,12 +828,12 @@ index 1f9148c7b5e1bcefbd63a00d1a11953c8e5d81ac..fea3a8f7f6b1cb3516d788b60c646606
 @@ -4,0 +5 @@
 +/.pnpm-store
 diff --git a/server/dashboard/Dockerfile b/server/dashboard/Dockerfile
-index 0f271e1ee44e61d156f9c789937cebde371381a1..a39aaf021cc525d79de071ea24df0fd0689dc06b 100644
+index 0f271e1ee44e61d156f9c789937cebde371381a1..0c3dad226b93718bbe850cdf4a0cc770b55db29f 100644
 --- a/server/dashboard/Dockerfile
 +++ b/server/dashboard/Dockerfile
 @@ -1 +1 @@
 -FROM node:20-alpine AS base
-+FROM node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32 AS base
++FROM --platform=$BUILDPLATFORM node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32 AS base
 @@ -3,0 +4,3 @@ WORKDIR /app
 +ENV PNPM_HOME=/pnpm
 +ENV PATH=$PNPM_HOME:$PATH
@@ -861,10 +861,13 @@ index 0f271e1ee44e61d156f9c789937cebde371381a1..a39aaf021cc525d79de071ea24df0fd0
 @@ -26 +24 @@ ENV NEXT_PUBLIC_INSTANCE_NAME=NEXT_PUBLIC_INSTANCE_NAME
 -RUN npm run build
 +RUN pnpm run build
-@@ -28 +26 @@ RUN npm run build
+@@ -28,2 +26,3 @@ RUN npm run build
 -# Production
-+# 运行时镜像
-@@ -38 +36 @@ RUN addgroup --system --gid 1001 nodejs && \
+-FROM base AS runner
++# 运行时镜像保持为目标平台，构建阶段则使用原生平台以避免 QEMU 执行 Node.js
++FROM node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32 AS runner
++RUN apk add --no-cache libc6-compat
+@@ -38 +37 @@ RUN addgroup --system --gid 1001 nodejs && \
 -COPY --from=builder /app/public ./public
 +COPY --from=builder --chown=nextjs:nodejs /app/public ./public
 diff --git a/server/dashboard/pnpm-lock.yaml b/server/dashboard/pnpm-lock.yaml
@@ -7911,15 +7914,27 @@ index 598f1df970e8502c39d8996a1839cdcfba5a08a2..e08b8215d784d92a62b1d3f7729f24ea
 +      "@types/d3-time": 3.0.4
 +      "@types/d3-timer": 3.0.2
 diff --git a/server/dashboard/pnpm-workspace.yaml b/server/dashboard/pnpm-workspace.yaml
-index d4bc1dfb64d18881bb60106aef3631d2aa6c68b5..3aa51d33f24258beaf7c84e2527e748d08e5e60e 100644
+index d4bc1dfb64d18881bb60106aef3631d2aa6c68b5..6c074d2a7bb4bae4c169d758544e902577362b31 100644
 --- a/server/dashboard/pnpm-workspace.yaml
 +++ b/server/dashboard/pnpm-workspace.yaml
-@@ -2 +2 @@ packages:
+@@ -2 +2,13 @@ packages:
 -  - '.'
 +  - "."
-@@ -4,0 +5 @@ overrides:
++
++supportedArchitectures:
++  os:
++    - current
++    - linux
++  cpu:
++    - current
++    - x64
++    - arm64
++  libc:
++    - current
++    - musl
+@@ -4,0 +17 @@ overrides:
 +  "sharp": "0.35.3"
-@@ -12,0 +14 @@ overrides:
+@@ -12,0 +26 @@ overrides:
 +  "nanoid@<3.3.17": ">=3.3.17 <4.0.0"
 diff --git a/server/dashboard/src/app/(root)/dashboard/api-keys/page.tsx b/server/dashboard/src/app/(root)/dashboard/api-keys/page.tsx
 index e38386fe1bcbebfdba178b3882373a52ab56ba60..5c010516456301deb30c45f9fb93a0fc959a6132 100644

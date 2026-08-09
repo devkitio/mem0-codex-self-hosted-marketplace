@@ -326,6 +326,11 @@ def main() -> None:
         "openresty/dashboard-proxy.conf",
         "proxy_pass http://127.0.0.1:3111",
         "COPY --from=builder --chown=nextjs:nodejs /app/public",
+        "FROM --platform=$BUILDPLATFORM node:22-alpine@sha256:",
+        "c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32 AS runner",
+        "supportedArchitectures:",
+        "    - arm64",
+        "    - musl",
     ):
         assert expected in patch_text, f"Mem0 生产补丁缺少 Dashboard 部署资产：{expected}"
 
