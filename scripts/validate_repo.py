@@ -25,6 +25,7 @@ MEM0_TOOLS = {
     "delete_memory",
     "get_memory_history",
     "list_entities",
+    "resolve_project_scope",
     "delete_all_memories",
     "delete_entities",
 }
@@ -35,6 +36,7 @@ READ_ONLY_TOOLS = {
     "get_memory",
     "get_memory_history",
     "list_entities",
+    "resolve_project_scope",
 }
 DESTRUCTIVE_TOOLS = {
     "update_memory",
@@ -216,6 +218,11 @@ def main() -> None:
     assert "python " in switch_skill and "python3 " in switch_skill, (
         "项目切换技能缺少跨平台 Python 命令"
     )
+    for command in ("--sync-project", "--clear-project", "--current-project"):
+        assert command in switch_skill and command in script, f"项目范围缺少命令：{command}"
+    assert "repository_fingerprint" in switch_skill and "server_project_scopes.json" in switch_skill, (
+        "项目切换技能缺少私有服务端同步流程"
+    )
     workflow = (ROOT / ".github" / "workflows" / "validate.yml").read_text(encoding="utf-8")
     for runner in ("ubuntu-latest", "windows-latest", "macos-latest"):
         assert runner in workflow, f"CI 缺少 {runner} 验证"
@@ -243,7 +250,9 @@ def main() -> None:
     assert '"/internal/mcp/search"' in adapter_source, "Adapter 搜索未走内部服务接口"
     assert '"/auth/me"' not in adapter_source, "Adapter 仍使用管理员身份接口校验 Key"
     assert '"/search"' not in adapter_source, "Adapter 仍调用公开搜索接口"
-    assert "get_access_token" not in adapter_source, "Adapter 仍可能转发客户端 Key"
+    assert "get_access_token" in adapter_source, "Adapter 未从认证上下文读取稳定主体"
+    assert "access_token.token" not in adapter_source, "Adapter 可能读取或转发客户端 Key"
+    assert "MCP_PROJECT_SCOPE_SECRET" in adapter_source, "Adapter 缺少私有项目范围 Secret"
     assert "_identity_env" in adapter_source, "Adapter 未强制显式配置内部身份"
     for forbidden in ("mem0-api.jiang.in", "codex-primary", "codex-primary-adapter"):
         assert forbidden not in adapter_source, f"Adapter 泄露生产默认值：{forbidden}"
@@ -321,6 +330,7 @@ def main() -> None:
     for expected in (
         "MEM0_MCP_ROOT:-/data/mem0Mcp",
         "mcp_confirmation_secret",
+        "mcp_project_scope_secret",
         "mem0_internal_service_key",
         "server/secrets",
     ):
@@ -372,6 +382,8 @@ def main() -> None:
         "apply",
         "--check",
         "reconfigure",
+        "TimeoutExpired",
+        "FETCH_GIT_TIMEOUT_SECONDS",
     ):
         assert expected in materializer, f"Mem0 物化脚本缺少安全门禁：{expected}"
     for expected in (
@@ -419,7 +431,7 @@ def main() -> None:
     for name in MEM0_TOOLS:
         assert f"`{name}(" in runtime_contract, f"运行时约定缺少工具：{name}"
     assert "默认禁用" in runtime_contract and all(name in runtime_contract for name in BULK_TOOLS)
-    print("验证通过：市场、MCP 十工具、六类增强钩子、运行时边界和 16 个技能均有效")
+    print("验证通过：市场、MCP 十一工具、六类增强钩子、运行时边界和 16 个技能均有效")
 
 
 if __name__ == "__main__":

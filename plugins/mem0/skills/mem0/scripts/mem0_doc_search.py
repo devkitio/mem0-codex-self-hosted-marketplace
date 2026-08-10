@@ -3,22 +3,26 @@
 
 macOS/Linux 使用 `python3`，Windows 将其替换为 `python`：
 
-    python3 mem0_doc_search.py --query "图记忆配置"
+    python3 mem0_doc_search.py --query "graph memory"
     python3 mem0_doc_search.py --page "/platform/features/graph-memory"
     python3 mem0_doc_search.py --index
 """
 
 import argparse
 import json
+import re
 import sys
 import urllib.error
 import urllib.parse
 import urllib.request
 
 DOCS_BASE = "https://docs.mem0.ai"
-SEARCH_ENDPOINT = f"{DOCS_BASE}/api/search"
 LLMS_INDEX = f"{DOCS_BASE}/llms.txt"
 MAX_RESPONSE_BYTES = 2_000_000
+MAX_SEARCH_RESULTS = 20
+MARKDOWN_DOC_LINK_RE = re.compile(
+    r"\[([^\]\n]{1,200})\]\((https://docs\.mem0\.ai(?:/[^)\s]*)?)\)"
+)
 
 # 用于定向检索的已知文档区段
 SECTION_MAP = {
@@ -58,6 +62,21 @@ SECTION_MAP = {
     "integrations": [
         "/integrations",
     ],
+}
+
+SECTION_PREFIXES = {
+    "platform": ("/platform/",),
+    "api": ("/api-reference/",),
+    "open-source": ("/open-source/", "/components/"),
+    "sdks": ("/sdks/",),
+    "integrations": ("/integrations",),
+}
+
+FETCH_ERROR_MESSAGES = {
+    "响应内容超过大小限制",
+    "URL 请求失败",
+    "文档请求失败",
+    "文档响应不是有效的 UTF-8 文本",
 }
 
 
@@ -122,44 +141,66 @@ def fetch_url(url: str) -> str:
         return "文档响应不是有效的 UTF-8 文本"
 
 
+def is_fetch_error(value: str) -> bool:
+    """识别 fetch_url 返回的稳定错误，不把错误正文当作文档索引。"""
+    return (
+        value in FETCH_ERROR_MESSAGES
+        or value.startswith("HTTP 错误 ")
+        or value.startswith("只允许读取 ")
+    )
+
+
+def parse_index(content: str) -> list[dict[str, str]]:
+    """从新版 llms.txt 中提取官方 Markdown 文档链接。"""
+    entries: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for line in content.splitlines():
+        for match in MARKDOWN_DOC_LINK_RE.finditer(line):
+            title = match.group(1).strip()
+            url = match.group(2)
+            if not title or url in seen or not is_allowed_docs_url(url):
+                continue
+            entry = {"title": title, "url": url}
+            description = line[match.end() :].strip().lstrip(":").strip()
+            if description:
+                entry["description"] = description
+            entries.append(entry)
+            seen.add(url)
+    return entries
+
+
+def matches_section(url: str, section: str | None) -> bool:
+    if not section or section not in SECTION_PREFIXES:
+        return True
+    path = urllib.parse.urlsplit(url).path
+    return any(path.startswith(prefix) for prefix in SECTION_PREFIXES[section])
+
+
 def search_docs(query: str, section: str | None = None) -> dict:
-    """优先使用 Mintlify 搜索，失败时回退到 llms.txt 关键词匹配。"""
-    # 优先使用 Mintlify 搜索接口
-    params = urllib.parse.urlencode({"query": query})
-    search_url = f"{SEARCH_ENDPOINT}?{params}"
-
-    try:
-        result = fetch_url(search_url)
-        data = json.loads(result)
-        if isinstance(data, dict) and data.get("results"):
-            results = data["results"]
-            if section and section in SECTION_MAP:
-                section_paths = SECTION_MAP[section]
-                results = [r for r in results if any(r.get("url", "").startswith(p) for p in section_paths)]
-            return {"source": "mintlify_search", "results": results}
-    except Exception:
-        pass
-
-    # 回退到 llms.txt 索引
+    """检索 llms.txt 中经过校验的官方文档链接。"""
     index_content = fetch_url(LLMS_INDEX)
-    query_lower = query.lower()
-    matching_urls = []
-
-    for line in index_content.splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        if query_lower in line.lower():
-            matching_urls.append(line)
-
-    if section and section in SECTION_MAP:
-        section_paths = SECTION_MAP[section]
-        matching_urls = [u for u in matching_urls if any(p in u for p in section_paths)]
-
+    if is_fetch_error(index_content):
+        return {"source": "llms_txt_index", "query": query, "error": index_content}
+    entries = parse_index(index_content)
+    if not entries:
+        return {
+            "source": "llms_txt_index",
+            "query": query,
+            "error": "文档索引格式无效",
+        }
+    query_lower = query.casefold().strip()
+    results = []
+    for entry in entries:
+        searchable = " ".join(entry.values()).casefold()
+        if query_lower in searchable and matches_section(entry["url"], section):
+            results.append(entry)
+            if len(results) == MAX_SEARCH_RESULTS:
+                break
     return {
         "source": "llms_txt_index",
         "query": query,
-        "matching_urls": matching_urls[:20],
+        "results": results,
+        "matching_urls": [entry["url"] for entry in results],
         "suggestion": "可读取具体 URL 查看完整内容",
     }
 
@@ -170,13 +211,20 @@ def fetch_page(page_path: str) -> dict:
     if not is_allowed_docs_url(url):
         return {"error": "只允许读取 https://docs.mem0.ai 下的文档页面"}
     content = fetch_url(url)
+    if is_fetch_error(content):
+        return {"url": url, "error": content}
     return {"url": url, "content": content[:10000], "truncated": len(content) > 10000}
 
 
 def get_index() -> dict:
     """读取 llms.txt 中的完整文档索引。"""
     content = fetch_url(LLMS_INDEX)
-    urls = [line.strip() for line in content.splitlines() if line.strip() and not line.startswith("#")]
+    if is_fetch_error(content):
+        return {"error": content}
+    entries = parse_index(content)
+    if not entries:
+        return {"error": "文档索引格式无效"}
+    urls = [entry["url"] for entry in entries]
     return {"total_pages": len(urls), "urls": urls, "sections": list(SECTION_MAP.keys())}
 
 
@@ -225,17 +273,20 @@ def main():
         print(json.dumps(result, indent=2))
     else:
         if isinstance(result, dict):
-            if "results" in result:
+            if "error" in result:
+                print(f"错误：{result['error']}")
+                if result.get("available"):
+                    print(f"可用区段：{', '.join(result['available'])}")
+            elif "results" in result:
                 print(f"来源：{result.get('source', '未知')}")
+                if result.get("query"):
+                    print(f"查询：{result['query']}")
+                if not result["results"]:
+                    print("未找到匹配的官方文档。")
                 for r in result["results"]:
                     print(f"  - {r.get('title', '无标题')}: {r.get('url', '无地址')}")
                     if r.get("description"):
                         print(f"    {r['description'][:200]}")
-            elif "matching_urls" in result:
-                print(f"来源：{result['source']}")
-                print(f"查询：{result['query']}")
-                for url in result["matching_urls"]:
-                    print(f"  - {url}")
                 if result.get("suggestion"):
                     print(f"\n{result['suggestion']}")
             elif "urls" in result:
@@ -254,10 +305,6 @@ def main():
                 if result.get("truncated"):
                     print("[内容已截断为 10000 个字符]")
                 print(result["content"])
-            elif "error" in result:
-                print(f"错误：{result['error']}")
-                if result.get("available"):
-                    print(f"可用区段：{', '.join(result['available'])}")
             else:
                 print(json.dumps(result, indent=2))
 

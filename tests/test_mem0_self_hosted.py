@@ -486,6 +486,16 @@ class Mem0SelfHostedTests(unittest.TestCase):
             )
             self.assertEqual(value, {})
 
+        resolver = self.capture_json(
+            mem0.handle_pre_tool,
+            {
+                "tool_name": "mcp__plugin_mem0_mem0__resolve_project_scope",
+                "tool_input": {"repository_fingerprint": "a" * 64},
+            },
+            "demo-project",
+        )
+        self.assertEqual(resolver, {})
+
     def test_pretool_保护托管记忆文件(self):
         value = self.capture_json(
             mem0.handle_pre_tool,
@@ -1279,6 +1289,487 @@ class Mem0SelfHostedTests(unittest.TestCase):
                 self.assertEqual(mem0.set_project_mapping(str(root), None), root.name)
                 self.assertEqual(mem0.resolve_project_id(str(root)), root.name)
 
+    def test_服务端项目范围可在不同机器和克隆间共享(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            source = base / "source-copy"
+            clone = base / "renamed-clone"
+            remotes = (
+                "git@github.com:team/shared-project.git",
+                "https://github.com/team/shared-project.git",
+            )
+            for root, remote in zip((source, clone), remotes):
+                git_directory = root / ".git"
+                git_directory.mkdir(parents=True)
+                (git_directory / "HEAD").write_text(
+                    "ref: refs/heads/main\n",
+                    encoding="utf-8",
+                )
+                (git_directory / "config").write_text(
+                    f'[remote "origin"]\n\turl = {remote}\n',
+                    encoding="utf-8",
+                )
+
+            fingerprints = []
+
+            def resolve_scope(name, arguments):
+                self.assertEqual(name, "resolve_project_scope")
+                fingerprint = arguments["repository_fingerprint"]
+                fingerprints.append(fingerprint)
+                return {"structuredContent": {"project_id": fingerprint}}
+
+            mem0._cached_git_root.cache_clear()
+            try:
+                with mock.patch.dict(
+                    mem0.os.environ,
+                    {"MEM0_SELF_HOSTED_API_KEY": "m0sk_test-shared-user"},
+                ), mock.patch.object(mem0, "call_tool", side_effect=resolve_scope):
+                    with mock.patch.object(mem0, "PLUGIN_DATA", base / "machine-a"):
+                        source_id = mem0.sync_project_scope(str(source))
+                        source_status = mem0.project_scope_status(str(source))
+                    with mock.patch.object(mem0, "PLUGIN_DATA", base / "machine-b"):
+                        clone_id = mem0.sync_project_scope(str(clone))
+                        clone_status = mem0.project_scope_status(str(clone))
+
+                self.assertEqual(source_id, clone_id)
+                self.assertEqual(fingerprints, [source_id, clone_id])
+                self.assertEqual(source_status["source"], "服务端同步范围")
+                self.assertEqual(clone_status["source"], "服务端同步范围")
+                self.assertTrue(source_status["sync_available"])
+                self.assertTrue(source_status["synchronized"])
+                self.assertFalse((source / ".mem0" / "project.json").exists())
+            finally:
+                mem0._cached_git_root.cache_clear()
+
+    def test_远端身份忽略协议默认端口(self):
+        expected = "github.com/team/shared-project"
+        for remote in (
+            "git@github.com:team/shared-project.git",
+            "ssh://git@github.com:22/team/shared-project.git",
+            "https://github.com/team/shared-project.git",
+            "https://github.com:443/team/shared-project.git",
+            "http://github.com:80/team/shared-project.git",
+            "git://github.com:9418/team/shared-project.git",
+        ):
+            with self.subTest(remote=remote):
+                self.assertEqual(mem0._normalized_remote_identity(remote), expected)
+        self.assertEqual(
+            mem0._normalized_remote_identity("ssh://git@github.com:2222/team/shared-project.git"),
+            "github.com:2222/team/shared-project",
+        )
+
+    def test_新仓库首次启动自动同步且缓存命中不重复请求(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            root = base / "demo-project"
+            git_directory = root / ".git"
+            git_directory.mkdir(parents=True)
+            (git_directory / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+            (git_directory / "config").write_text(
+                '[remote "origin"]\n\turl = git@github.com:team/demo-project.git\n',
+                encoding="utf-8",
+            )
+            mem0._cached_git_root.cache_clear()
+            try:
+                with mock.patch.object(mem0, "PLUGIN_DATA", base / "data"), mock.patch.dict(
+                    mem0.os.environ,
+                    {"MEM0_SELF_HOSTED_API_KEY": "m0sk_test-auto-sync"},
+                ), mock.patch.object(
+                    mem0,
+                    "call_tool",
+                    return_value={"structuredContent": {"project_id": "server-project"}},
+                ) as call:
+                    initial_status = mem0.project_scope_status(str(root))
+                    self.assertEqual(initial_status["source"], "自动识别")
+                    self.assertFalse(initial_status["migration_required"])
+                    self.assertEqual(mem0.maybe_auto_sync_project_scope(str(root)), "")
+                    self.assertEqual(mem0.resolve_project_id(str(root)), "server-project")
+                    self.assertEqual(mem0.maybe_auto_sync_project_scope(str(root)), "")
+                    status = mem0.project_scope_status(str(root))
+                    cache_text = mem0.server_project_scopes_path().read_text(encoding="utf-8")
+
+                call.assert_called_once()
+                self.assertEqual(status["source"], "服务端同步范围")
+                self.assertTrue(status["synchronized"])
+                self.assertFalse(status["migration_required"])
+                self.assertNotIn("m0sk_test-auto-sync", cache_text)
+            finally:
+                mem0._cached_git_root.cache_clear()
+
+    def test_项目范围缓存按连接凭据隔离(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            root = base / "demo-project"
+            git_directory = root / ".git"
+            git_directory.mkdir(parents=True)
+            (git_directory / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+            (git_directory / "config").write_text(
+                '[remote "origin"]\n\turl = https://github.com/team/demo-project.git\n',
+                encoding="utf-8",
+            )
+
+            def resolve_scope(_name, _arguments):
+                token = mem0.os.environ["MEM0_SELF_HOSTED_API_KEY"]
+                return {
+                    "structuredContent": {
+                        "project_id": "project-a" if token.endswith("-a") else "project-b"
+                    }
+                }
+
+            mem0._cached_git_root.cache_clear()
+            try:
+                with mock.patch.object(mem0, "PLUGIN_DATA", base / "data"), mock.patch.object(
+                    mem0,
+                    "call_tool",
+                    side_effect=resolve_scope,
+                ) as call:
+                    with mock.patch.dict(
+                        mem0.os.environ,
+                        {"MEM0_SELF_HOSTED_API_KEY": "m0sk_test-user-a"},
+                    ):
+                        self.assertEqual(mem0.sync_project_scope(str(root)), "project-a")
+                    with mock.patch.dict(
+                        mem0.os.environ,
+                        {"MEM0_SELF_HOSTED_API_KEY": "m0sk_test-user-b"},
+                    ):
+                        self.assertEqual(mem0.sync_project_scope(str(root)), "project-b")
+                        self.assertEqual(mem0.resolve_project_id(str(root)), "project-b")
+                    with mock.patch.dict(
+                        mem0.os.environ,
+                        {"MEM0_SELF_HOSTED_API_KEY": "m0sk_test-user-a"},
+                    ):
+                        self.assertEqual(mem0.resolve_project_id(str(root)), "project-a")
+
+                    cache = mem0.load_json_file(mem0.server_project_scopes_path(), {})
+                    cache_text = mem0.server_project_scopes_path().read_text(encoding="utf-8")
+
+                self.assertEqual(call.call_count, 2)
+                self.assertEqual(cache["version"], 2)
+                self.assertEqual(len(cache["scopes"]), 2)
+                self.assertNotIn("m0sk_test-user-a", cache_text)
+                self.assertNotIn("m0sk_test-user-b", cache_text)
+            finally:
+                mem0._cached_git_root.cache_clear()
+
+    def test_旧项目不会自动切换但手动同步后解除迁移提示(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            root = base / "demo-project"
+            git_directory = root / ".git"
+            git_directory.mkdir(parents=True)
+            (git_directory / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+            (git_directory / "config").write_text(
+                '[remote "origin"]\n\turl = https://github.com/team/demo-project.git\n',
+                encoding="utf-8",
+            )
+            mem0._cached_git_root.cache_clear()
+            try:
+                with mock.patch.object(mem0, "PLUGIN_DATA", base / "data"), mock.patch.dict(
+                    mem0.os.environ,
+                    {"MEM0_SELF_HOSTED_API_KEY": "m0sk_test-user-a"},
+                ), mock.patch.object(
+                    mem0,
+                    "call_tool",
+                    return_value={"structuredContent": {"project_id": "server-project"}},
+                ) as call:
+                    identity = mem0._repository_identity_key(root)
+                    mem0.atomic_write_json(
+                        mem0.project_claims_path(),
+                        {
+                            "version": 1,
+                            "claims": {
+                                identity: {
+                                    "project_id": "demo-project",
+                                    "legacy_project_id": "demo-project",
+                                    "collision": False,
+                                }
+                            },
+                        },
+                    )
+                    self.assertEqual(mem0.resolve_project_id(str(root)), "demo-project")
+                    notice = mem0.maybe_auto_sync_project_scope(str(root))
+                    status = mem0.project_scope_status(str(root))
+                    call.assert_not_called()
+
+                    self.assertIn("已有本机项目范围", notice)
+                    self.assertTrue(status["migration_required"])
+                    self.assertEqual(mem0.sync_project_scope(str(root)), "server-project")
+                    self.assertFalse(mem0.project_scope_status(str(root))["migration_required"])
+            finally:
+                mem0._cached_git_root.cache_clear()
+
+    def test_自动同步失败后即使生成本机范围仍会重试(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            root = base / "demo-project"
+            git_directory = root / ".git"
+            git_directory.mkdir(parents=True)
+            (git_directory / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+            (git_directory / "config").write_text(
+                '[remote "origin"]\n\turl = https://github.com/team/demo-project.git\n',
+                encoding="utf-8",
+            )
+            mem0._cached_git_root.cache_clear()
+            try:
+                with mock.patch.object(mem0, "PLUGIN_DATA", base / "data"), mock.patch.dict(
+                    mem0.os.environ,
+                    {"MEM0_SELF_HOSTED_API_KEY": "m0sk_test-retry"},
+                ), mock.patch.object(
+                    mem0,
+                    "call_tool",
+                    side_effect=[
+                        RuntimeError("temporary failure"),
+                        {"structuredContent": {"project_id": "server-project"}},
+                    ],
+                ) as call:
+                    notice = mem0.maybe_auto_sync_project_scope(str(root))
+                    self.assertIn("后续启动会自动重试", notice)
+                    self.assertEqual(mem0.resolve_project_id(str(root)), "demo-project")
+                    self.assertTrue(mem0.project_scope_sync_pending(str(root)))
+                    self.assertEqual(mem0.maybe_auto_sync_project_scope(str(root)), "")
+                    self.assertEqual(mem0.resolve_project_id(str(root)), "server-project")
+                    self.assertFalse(mem0.project_scope_sync_pending(str(root)))
+
+                self.assertEqual(call.call_count, 2)
+            finally:
+                mem0._cached_git_root.cache_clear()
+
+    def test_项目范围待同步时阻止所有自动写入(self):
+        policy = {
+            "settings": {},
+            "search": [],
+            "ignore": [],
+            "identity": [],
+            "categories": [],
+            "retention": {},
+        }
+        settings = {**mem0.DEFAULT_SETTINGS, "auto_search": False}
+        with mock.patch.object(mem0, "parse_mem0_md", return_value=policy), mock.patch.object(
+            mem0,
+            "load_settings",
+            return_value=settings,
+        ), mock.patch.object(
+            mem0,
+            "maybe_auto_sync_project_scope",
+            return_value="自动获取跨机器项目范围失败；记忆写入已暂停。",
+        ), mock.patch.object(
+            mem0,
+            "resolve_project_id",
+            return_value="demo-project",
+        ), mock.patch.object(
+            mem0,
+            "project_scope_sync_pending",
+            return_value=True,
+        ), mock.patch.object(
+            mem0,
+            "project_scope_notice",
+            return_value="",
+        ), mock.patch.object(mem0, "auto_import_project_files") as auto_import, mock.patch.object(
+            mem0,
+            "save_summary",
+        ) as save:
+            startup = self.capture_json(
+                mem0.handle_event,
+                {
+                    "hook_event_name": "SessionStart",
+                    "source": "startup",
+                    "cwd": "demo",
+                },
+            )
+            self.capture_json(
+                mem0.handle_event,
+                {
+                    "hook_event_name": "Stop",
+                    "cwd": "demo",
+                    "last_assistant_message": "已经完成关键架构决定。",
+                },
+            )
+            denied = self.capture_json(
+                mem0.handle_event,
+                {
+                    "hook_event_name": "PreToolUse",
+                    "tool_name": "mcp__plugin_mem0_mem0__add_memory",
+                    "tool_input": {"text": "不应写入本机临时范围"},
+                    "cwd": "demo",
+                },
+            )
+
+        auto_import.assert_not_called()
+        save.assert_not_called()
+        self.assertIn("记忆写入已暂停", json.dumps(startup, ensure_ascii=False))
+        self.assertEqual(denied["hookSpecificOutput"]["permissionDecision"], "deny")
+        self.assertIn("尚未同步", denied["hookSpecificOutput"]["permissionDecisionReason"])
+
+    def test_会话启动执行自动项目同步并注入迁移提示(self):
+        policy = {
+            "settings": {},
+            "search": [],
+            "ignore": [],
+            "identity": [],
+            "categories": [],
+            "retention": {},
+        }
+        settings = {**mem0.DEFAULT_SETTINGS, "auto_search": False}
+        with mock.patch.object(
+            mem0,
+            "parse_mem0_md",
+            return_value=policy,
+        ), mock.patch.object(
+            mem0,
+            "load_settings",
+            return_value=settings,
+        ), mock.patch.object(
+            mem0,
+            "maybe_auto_sync_project_scope",
+            return_value="需要确认迁移旧项目范围。",
+        ) as synchronize, mock.patch.object(
+            mem0,
+            "resolve_project_id",
+            return_value="demo-project",
+        ), mock.patch.object(
+            mem0,
+            "project_scope_notice",
+            return_value="",
+        ):
+            output = self.capture_json(
+                mem0.handle_event,
+                {
+                    "hook_event_name": "SessionStart",
+                    "source": "resume",
+                    "cwd": "demo",
+                },
+            )
+
+        synchronize.assert_called_once_with("demo", True)
+        self.assertIn("需要确认迁移旧项目范围", json.dumps(output, ensure_ascii=False))
+
+    def test_无远端时同步失败并保留自动范围(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "demo-project"
+            git_directory = root / ".git"
+            git_directory.mkdir(parents=True)
+            (git_directory / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+            mem0._cached_git_root.cache_clear()
+            try:
+                with mock.patch.object(mem0, "PLUGIN_DATA", Path(directory) / "data"), mock.patch.object(
+                    mem0, "call_tool"
+                ) as call:
+                    status = mem0.project_scope_status(str(root))
+                    with self.assertRaisesRegex(ValueError, "没有可识别的远端地址"):
+                        mem0.sync_project_scope(str(root))
+
+                self.assertEqual(status["project_id"], "demo-project")
+                self.assertEqual(status["source"], "自动识别")
+                self.assertFalse(status["sync_available"])
+                self.assertFalse(status["synchronized"])
+                call.assert_not_called()
+            finally:
+                mem0._cached_git_root.cache_clear()
+
+    def test_显式映射优先且清除时同时删除服务端缓存(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "demo-project"
+            git_directory = root / ".git"
+            git_directory.mkdir(parents=True)
+            (git_directory / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+            (git_directory / "config").write_text(
+                '[remote "origin"]\n\turl = git@github.com:team/demo-project.git\n',
+                encoding="utf-8",
+            )
+            mem0._cached_git_root.cache_clear()
+            try:
+                with mock.patch.object(mem0, "PLUGIN_DATA", Path(directory) / "data"), mock.patch.dict(
+                    mem0.os.environ,
+                    {"MEM0_SELF_HOSTED_API_KEY": "m0sk_test-user-a"},
+                ), mock.patch.object(
+                    mem0,
+                    "call_tool",
+                    return_value={"structuredContent": {"project_id": "server-project"}},
+                ):
+                    self.assertEqual(mem0.sync_project_scope(str(root)), "server-project")
+                    self.assertEqual(mem0.set_project_mapping(str(root), "explicit-project"), "explicit-project")
+                    self.assertEqual(mem0.project_scope_status(str(root))["source"], "本机显式映射")
+                    self.assertEqual(mem0.set_project_mapping(str(root), None), "demo-project")
+                    status = mem0.project_scope_status(str(root))
+                    cache = mem0.load_json_file(mem0.server_project_scopes_path(), {})
+
+                self.assertEqual(status["source"], "自动识别")
+                self.assertFalse(status["synchronized"])
+                self.assertEqual(cache["scopes"], {})
+            finally:
+                mem0._cached_git_root.cache_clear()
+
+    def test_同步项目命令返回服务端范围和最终优先级(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "demo-project"
+            git_directory = root / ".git"
+            git_directory.mkdir(parents=True)
+            (git_directory / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+            (git_directory / "config").write_text(
+                '[remote "origin"]\n\turl = https://github.com/team/demo-project.git\n',
+                encoding="utf-8",
+            )
+            output = io.StringIO()
+            mem0._cached_git_root.cache_clear()
+            try:
+                with mock.patch.object(mem0, "PLUGIN_DATA", Path(directory) / "data"), mock.patch.dict(
+                    mem0.os.environ,
+                    {"MEM0_SELF_HOSTED_API_KEY": "m0sk_test-command"},
+                ), mock.patch.object(
+                    mem0,
+                    "call_tool",
+                    return_value={"structuredContent": {"project_id": "server-project"}},
+                ), mock.patch.object(
+                    mem0.sys,
+                    "argv",
+                    [str(SCRIPT), "--sync-project", "--cwd", str(root)],
+                ), redirect_stdout(output):
+                    self.assertEqual(mem0.main(), 0)
+
+                result = json.loads(output.getvalue())
+                self.assertEqual(result["状态"], "已同步服务端项目范围")
+                self.assertEqual(result["project_id"], "server-project")
+                self.assertEqual(result["server_project_id"], "server-project")
+                self.assertEqual(result["source"], "服务端同步范围")
+                self.assertTrue(result["synchronized"])
+            finally:
+                mem0._cached_git_root.cache_clear()
+
+    def test_同步项目命令错误会脱敏且不输出回溯(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "demo-project"
+            git_directory = root / ".git"
+            git_directory.mkdir(parents=True)
+            (git_directory / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+            (git_directory / "config").write_text(
+                '[remote "origin"]\n\turl = https://github.com/team/demo-project.git\n',
+                encoding="utf-8",
+            )
+            output = io.StringIO()
+            mem0._cached_git_root.cache_clear()
+            try:
+                with mock.patch.object(mem0, "PLUGIN_DATA", Path(directory) / "data"), mock.patch.dict(
+                    mem0.os.environ,
+                    {"MEM0_SELF_HOSTED_API_KEY": "m0sk_test-error"},
+                ), mock.patch.object(
+                    mem0,
+                    "call_tool",
+                    side_effect=RuntimeError("Authorization: Bearer private-sync-token"),
+                ), mock.patch.object(
+                    mem0.sys,
+                    "argv",
+                    [str(SCRIPT), "--sync-project", "--cwd", str(root)],
+                ), redirect_stderr(output):
+                    self.assertEqual(mem0.main(), 2)
+
+                error = output.getvalue()
+                result = json.loads(error)
+                self.assertEqual(result["状态"], "失败")
+                self.assertNotIn("private-sync-token", error)
+                self.assertNotIn("Traceback", error)
+            finally:
+                mem0._cached_git_root.cache_clear()
+
     def test_同名仓库按远端身份隔离且显式映射可消除提示(self):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
@@ -1697,6 +2188,68 @@ class Mem0SelfHostedTests(unittest.TestCase):
         self.assertEqual(result, "URL 请求失败")
         self.assertNotIn("network-secret", result)
 
+    def test_文档索引只解析官方链接并去重(self):
+        content = """
+说明文字与 `MemoryClient` 代码不应被计为页面。
+- [Graph Memory](https://docs.mem0.ai/open-source/features/graph-memory) [OSS]: 图记忆说明
+- [Graph Memory 重复](https://docs.mem0.ai/open-source/features/graph-memory)
+- [LLM 配置](https://docs.mem0.ai/components/llms/config) [OSS]: 模型配置
+- [外部链接](https://example.com/private)
+"""
+        with mock.patch.object(mem0_docs, "fetch_url", return_value=content):
+            index = mem0_docs.get_index()
+            result = mem0_docs.search_docs("配置", section="open-source")
+
+        self.assertEqual(index["total_pages"], 2)
+        self.assertEqual(len(result["results"]), 1)
+        self.assertEqual(result["results"][0]["title"], "LLM 配置")
+        self.assertEqual(
+            result["matching_urls"],
+            ["https://docs.mem0.ai/components/llms/config"],
+        )
+        self.assertTrue(all(mem0_docs.is_allowed_docs_url(url) for url in index["urls"]))
+
+    def test_文档搜索限制结构化结果数量(self):
+        content = "\n".join(
+            f"- [Memory {index}](https://docs.mem0.ai/platform/page-{index})"
+            for index in range(mem0_docs.MAX_SEARCH_RESULTS + 5)
+        )
+        with mock.patch.object(mem0_docs, "fetch_url", return_value=content):
+            result = mem0_docs.search_docs("memory", section="platform")
+
+        self.assertEqual(len(result["results"]), mem0_docs.MAX_SEARCH_RESULTS)
+        self.assertEqual(len(result["matching_urls"]), mem0_docs.MAX_SEARCH_RESULTS)
+
+    def test_文档搜索无结果时给出明确提示(self):
+        content = "- [Graph Memory](https://docs.mem0.ai/platform/features/graph-memory)"
+        output = io.StringIO()
+        with mock.patch.object(mem0_docs, "fetch_url", return_value=content), mock.patch.object(
+            mem0_docs.sys,
+            "argv",
+            [str(DOC_SCRIPT), "--query", "不存在的查询"],
+        ), redirect_stdout(output):
+            mem0_docs.main()
+
+        text = output.getvalue()
+        self.assertIn("查询：不存在的查询", text)
+        self.assertIn("未找到匹配的官方文档", text)
+        self.assertIn("可读取具体 URL", text)
+
+    def test_文档索引错误不会伪装成搜索结果(self):
+        with mock.patch.object(mem0_docs, "fetch_url", return_value="URL 请求失败"):
+            result = mem0_docs.search_docs("请求")
+            index = mem0_docs.get_index()
+
+        self.assertEqual(result["error"], "URL 请求失败")
+        self.assertNotIn("results", result)
+        self.assertEqual(index, {"error": "URL 请求失败"})
+
+        with mock.patch.object(mem0_docs, "fetch_url", return_value="格式已经改变"):
+            malformed_result = mem0_docs.search_docs("memory")
+            malformed_index = mem0_docs.get_index()
+        self.assertEqual(malformed_result["error"], "文档索引格式无效")
+        self.assertEqual(malformed_index, {"error": "文档索引格式无效"})
+
     def test_文档搜索在非_UTF8_控制台仍输出_UTF8(self):
         environment = dict(os.environ)
         environment["PYTHONIOENCODING"] = "cp1252"
@@ -1838,6 +2391,23 @@ class Mem0SelfHostedTests(unittest.TestCase):
         self.assertEqual(settings["confidence_threshold"], 0.0)
         self.assertEqual(settings["session_retention_days"], 60)
         self.assertFalse(settings["rerank"])
+
+    def test_项目文件不能控制自动范围同步(self):
+        settings = dict(mem0.DEFAULT_SETTINGS)
+        with mock.patch.object(mem0, "log_error"):
+            mem0._apply_settings_layer(
+                settings,
+                {"auto_sync_project": False},
+                "mem0.md",
+            )
+        self.assertTrue(settings["auto_sync_project"])
+
+        mem0._apply_settings_layer(
+            settings,
+            {"auto_sync_project": False},
+            "settings.json",
+        )
+        self.assertFalse(settings["auto_sync_project"])
 
     def test_设置命令可初始化并显示安全默认值(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -2022,7 +2592,7 @@ class Mem0SelfHostedTests(unittest.TestCase):
         self.assertEqual(arguments["metadata"]["files_touched"], ["src/app.py"])
         self.assertNotIn(str(base), arguments["messages"][0]["content"])
 
-    def test_契约快照锁定十工具和关键枚举(self):
+    def test_契约快照锁定十一工具和关键枚举(self):
         snapshot = json.loads(mem0.SCHEMA_SNAPSHOT_PATH.read_text(encoding="utf-8"))
         self.assertEqual(set(snapshot["tools"]), mem0.MEM0_TOOL_NAMES)
         self.assertEqual(

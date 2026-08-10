@@ -60,6 +60,7 @@ TARGET_PROJECT_FILES = ("CLAUDE.md", "AGENTS.md", ".cursorrules", ".windsurfrule
 DEFAULT_SETTINGS: dict[str, Any] = {
     "auto_save": True,
     "auto_search": True,
+    "auto_sync_project": True,
     "search_limit": 5,
     "confidence_threshold": 0.25,
     "rerank": True,
@@ -69,6 +70,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
 SETTING_ENV_VARS = {
     "auto_save": "MEM0_AUTO_SAVE",
     "auto_search": "MEM0_AUTO_SEARCH",
+    "auto_sync_project": "MEM0_AUTO_SYNC_PROJECT",
     "search_limit": "MEM0_SEARCH_LIMIT",
     "confidence_threshold": "MEM0_CONFIDENCE_THRESHOLD",
     "rerank": "MEM0_RERANK",
@@ -87,6 +89,7 @@ MEM0_TOOL_NAMES = {
     "get_memory",
     "get_memory_history",
     "list_entities",
+    "resolve_project_scope",
     "update_memory",
 }
 MUTATING_TOOLS = {
@@ -475,10 +478,17 @@ def _normalized_remote_identity(value: str) -> str:
     else:
         try:
             parsed = urllib.parse.urlsplit(remote)
-            if parsed.scheme.casefold() not in {"http", "https", "ssh", "git"} or not parsed.hostname:
+            scheme = parsed.scheme.casefold()
+            if scheme not in {"http", "https", "ssh", "git"} or not parsed.hostname:
                 return ""
             host = parsed.hostname.casefold()
-            port = f":{parsed.port}" if parsed.port is not None else ""
+            port_number = parsed.port
+            default_ports = {"http": 80, "https": 443, "ssh": 22, "git": 9418}
+            port = (
+                f":{port_number}"
+                if port_number is not None and port_number != default_ports[scheme]
+                else ""
+            )
             path = urllib.parse.unquote(parsed.path)
         except ValueError:
             return ""
@@ -488,7 +498,7 @@ def _normalized_remote_identity(value: str) -> str:
     return f"{host}{port}/{path}" if path else ""
 
 
-def _repository_identity_key(root: Path) -> str:
+def _repository_remote_fingerprint(root: Path) -> str | None:
     git_directory = _git_directory(root)
     if git_directory is not None:
         config_text = _read_small_text(_git_config_path(git_directory), max_bytes=65_536)
@@ -506,6 +516,13 @@ def _repository_identity_key(root: Path) -> str:
                 identity = _normalized_remote_identity(parser.get(section, "url", fallback=""))
                 if identity:
                     return hashlib.sha256(b"remote\0" + identity.encode("utf-8")).hexdigest()
+    return None
+
+
+def _repository_identity_key(root: Path) -> str:
+    remote_fingerprint = _repository_remote_fingerprint(root)
+    if remote_fingerprint is not None:
+        return remote_fingerprint
     material = os.fsencode(os.path.normcase(str(root.resolve())))
     return hashlib.sha256(b"path\0" + material).hexdigest()
 
@@ -532,6 +549,14 @@ def project_mapping_path() -> Path:
 
 def project_claims_path() -> Path:
     return PLUGIN_DATA / "project_claims.json"
+
+
+def server_project_scopes_path() -> Path:
+    return PLUGIN_DATA / "server_project_scopes.json"
+
+
+def project_sync_state_path() -> Path:
+    return PLUGIN_DATA / "project_sync_state.json"
 
 
 def project_scope_lock_path() -> Path:
@@ -572,6 +597,87 @@ def _mapped_project_id(root: Path, mappings: Any) -> str | None:
     except ValueError:
         log_error("忽略不符合生产契约的项目映射")
         return None
+
+
+def _credential_fingerprint() -> str:
+    url, token = load_connection()
+    material = url.encode("utf-8") + b"\0" + token.encode("utf-8")
+    return hashlib.sha256(b"connection\0" + material).hexdigest()
+
+
+def _current_credential_fingerprint() -> str | None:
+    try:
+        return _credential_fingerprint()
+    except (OSError, RuntimeError, ValueError, json.JSONDecodeError):
+        return None
+
+
+def _server_project_id(
+    scopes: Any,
+    repository_fingerprint: str | None,
+    credential_fingerprint: str | None,
+) -> str | None:
+    if (
+        repository_fingerprint is None
+        or credential_fingerprint is None
+        or not isinstance(scopes, dict)
+        or scopes.get("version") != 2
+    ):
+        return None
+    credentials = scopes.get("scopes")
+    records = credentials.get(credential_fingerprint) if isinstance(credentials, dict) else None
+    value = records.get(repository_fingerprint) if isinstance(records, dict) else None
+    if not isinstance(value, str):
+        return None
+    try:
+        return validate_project_id(value)
+    except ValueError:
+        log_error("忽略不符合生产契约的服务端项目范围")
+        return None
+
+
+def _project_claim_exists(root: Path) -> bool:
+    state = load_json_file(project_claims_path(), {})
+    claims = state.get("claims") if isinstance(state, dict) else None
+    return isinstance(claims, dict) and isinstance(
+        claims.get(_repository_identity_key(root)),
+        dict,
+    )
+
+
+def _project_sync_mode(repository_fingerprint: str) -> str | None:
+    state = load_json_file(project_sync_state_path(), {})
+    repositories = state.get("repositories") if isinstance(state, dict) else None
+    value = repositories.get(repository_fingerprint) if isinstance(repositories, dict) else None
+    return value if value in {"auto", "legacy"} else None
+
+
+def _set_project_sync_mode(repository_fingerprint: str, mode: str) -> None:
+    lock_path = project_scope_lock_path()
+    if not wait_for_lock(lock_path, timeout=5):
+        raise TimeoutError("等待项目范围锁超时")
+    try:
+        path = project_sync_state_path()
+        state = load_json_file(path, {})
+        if not isinstance(state, dict) or state.get("version") != 1:
+            state = {"version": 1, "repositories": {}}
+        repositories = state.get("repositories")
+        if not isinstance(repositories, dict):
+            repositories = {}
+            state["repositories"] = repositories
+        if repositories.get(repository_fingerprint) != mode:
+            repositories[repository_fingerprint] = mode
+            atomic_write_json(path, state)
+    finally:
+        release_lock(lock_path)
+
+
+def _ensure_project_sync_mode(root: Path, repository_fingerprint: str) -> str:
+    mode = _project_sync_mode(repository_fingerprint)
+    if mode is None:
+        mode = "legacy" if _project_claim_exists(root) else "auto"
+        _set_project_sync_mode(repository_fingerprint, mode)
+    return mode
 
 
 def _collision_project_id(legacy_id: str, identity_key: str, claimed: set[str]) -> str:
@@ -635,16 +741,73 @@ def _automatic_project_id(root: Path) -> str:
 
 
 def resolve_project_id(cwd: str | None) -> str:
-    """优先使用显式映射，否则使用带本机冲突保护的自动范围。"""
+    """按显式映射、服务端同步、本机自动范围的顺序解析项目。"""
     root = git_root(cwd)
     mappings = load_json_file(project_mapping_path(), {})
     mapped = _mapped_project_id(root, mappings)
-    return mapped if mapped is not None else _automatic_project_id(root)
+    if mapped is not None:
+        return mapped
+    repository_fingerprint = _repository_remote_fingerprint(root)
+    synchronized = _server_project_id(
+        load_json_file(server_project_scopes_path(), {}),
+        repository_fingerprint,
+        _current_credential_fingerprint(),
+    )
+    if synchronized is not None:
+        return synchronized
+    if repository_fingerprint is not None:
+        _ensure_project_sync_mode(root, repository_fingerprint)
+    return _automatic_project_id(root)
+
+
+def project_scope_status(cwd: str | None) -> dict[str, Any]:
+    root = git_root(cwd)
+    mapped = _mapped_project_id(root, load_json_file(project_mapping_path(), {}))
+    repository_fingerprint = _repository_remote_fingerprint(root)
+    synchronized = _server_project_id(
+        load_json_file(server_project_scopes_path(), {}),
+        repository_fingerprint,
+        _current_credential_fingerprint(),
+    )
+    sync_mode = (
+        _ensure_project_sync_mode(root, repository_fingerprint)
+        if mapped is None and synchronized is None and repository_fingerprint is not None
+        else None
+    )
+    if mapped is not None:
+        source = "本机显式映射"
+        project_id = mapped
+    elif synchronized is not None:
+        source = "服务端同步范围"
+        project_id = synchronized
+    else:
+        source = "自动识别"
+        project_id = _automatic_project_id(root)
+    return {
+        "project_id": project_id,
+        "source": source,
+        "sync_available": repository_fingerprint is not None,
+        "synchronized": synchronized is not None,
+        "migration_required": (
+            mapped is None
+            and synchronized is None
+            and repository_fingerprint is not None
+            and sync_mode == "legacy"
+        ),
+    }
 
 
 def project_scope_notice(cwd: str | None) -> str:
     root = git_root(cwd)
-    if _mapped_project_id(root, load_json_file(project_mapping_path(), {})) is not None:
+    mapped = _mapped_project_id(root, load_json_file(project_mapping_path(), {}))
+    if mapped is not None:
+        return ""
+    synchronized = _server_project_id(
+        load_json_file(server_project_scopes_path(), {}),
+        _repository_remote_fingerprint(root),
+        _current_credential_fingerprint(),
+    )
+    if synchronized is not None:
         return ""
     state = load_json_file(project_claims_path(), {})
     claims = state.get("claims", {}) if isinstance(state, dict) else {}
@@ -656,13 +819,15 @@ def project_scope_notice(cwd: str | None) -> str:
     return (
         f"检测到同名但身份不同的 Git 仓库；当前工作区已隔离为 project_id `{project_id}`。"
         f"旧范围 `{legacy_id}` 中可能存在此前混合的记忆，插件不会自动迁移或删除；"
-        "跨机器共享请使用 `mem0:switch-project` 为各副本设置同一个明确的 project_id。"
+        "跨机器共享请使用 `mem0:switch-project` 确认迁移到服务端私有范围。"
     )
 
 
 def set_project_mapping(cwd: str | None, project_id: str | None) -> str:
     root = git_root(cwd)
     path = project_mapping_path()
+    scopes_path = server_project_scopes_path()
+    sync_state_path = project_sync_state_path()
     lock_path = project_scope_lock_path()
     if not wait_for_lock(lock_path, timeout=5):
         raise TimeoutError("等待项目映射锁超时")
@@ -673,6 +838,40 @@ def set_project_mapping(cwd: str | None, project_id: str | None) -> str:
         key = _project_mapping_key(root)
         if project_id is None:
             changed = key in mappings
+            repository_fingerprint = _repository_remote_fingerprint(root)
+            scopes = load_json_file(scopes_path, {})
+            scopes_valid = isinstance(scopes, dict) and scopes.get("version") == 2
+            if not scopes_valid:
+                scopes = {"version": 2, "scopes": {}}
+            credentials = scopes.get("scopes")
+            if not isinstance(credentials, dict):
+                credentials = {}
+                scopes["scopes"] = credentials
+            scopes_changed = scopes_path.exists() and not scopes_valid
+            if repository_fingerprint:
+                for credential, records in list(credentials.items()):
+                    if not isinstance(records, dict):
+                        credentials.pop(credential, None)
+                        scopes_changed = True
+                        continue
+                    if repository_fingerprint in records:
+                        records.pop(repository_fingerprint, None)
+                        scopes_changed = True
+                    if not records:
+                        credentials.pop(credential, None)
+            if scopes_changed:
+                atomic_write_json(scopes_path, scopes)
+            if repository_fingerprint:
+                sync_state = load_json_file(sync_state_path, {})
+                if not isinstance(sync_state, dict) or sync_state.get("version") != 1:
+                    sync_state = {"version": 1, "repositories": {}}
+                repositories = sync_state.get("repositories")
+                if not isinstance(repositories, dict):
+                    repositories = {}
+                    sync_state["repositories"] = repositories
+                if repositories.get(repository_fingerprint) != "auto":
+                    repositories[repository_fingerprint] = "auto"
+                    atomic_write_json(sync_state_path, sync_state)
             mappings.pop(key, None)
             resolved = None
         else:
@@ -684,6 +883,112 @@ def set_project_mapping(cwd: str | None, project_id: str | None) -> str:
     finally:
         release_lock(lock_path)
     return resolve_project_id(str(root)) if resolved is None else resolved
+
+
+def sync_project_scope(cwd: str | None) -> str:
+    """从 MCP 获取当前认证主体对应的私有稳定项目范围并缓存到本机。"""
+    root = git_root(cwd)
+    repository_fingerprint = _repository_remote_fingerprint(root)
+    if repository_fingerprint is None:
+        raise ValueError("当前 Git 仓库没有可识别的远端地址，无法同步项目范围")
+    credential_fingerprint = _credential_fingerprint()
+    payload = structured_payload(
+        call_tool(
+            "resolve_project_scope",
+            {"repository_fingerprint": repository_fingerprint},
+        )
+    )
+    project_value = payload.get("project_id")
+    if not isinstance(project_value, str):
+        raise RuntimeError("项目范围工具响应缺少 project_id")
+    project_id = validate_project_id(project_value)
+    lock_path = project_scope_lock_path()
+    if not wait_for_lock(lock_path, timeout=5):
+        raise TimeoutError("等待项目范围锁超时")
+    try:
+        path = server_project_scopes_path()
+        state = load_json_file(path, {})
+        if not isinstance(state, dict) or state.get("version") != 2:
+            state = {"version": 2, "scopes": {}}
+        credentials = state.get("scopes")
+        if not isinstance(credentials, dict):
+            credentials = {}
+            state["scopes"] = credentials
+        scopes = credentials.get(credential_fingerprint)
+        if not isinstance(scopes, dict):
+            scopes = {}
+            credentials[credential_fingerprint] = scopes
+        if scopes.get(repository_fingerprint) != project_id:
+            scopes[repository_fingerprint] = project_id
+            atomic_write_json(path, state)
+        sync_path = project_sync_state_path()
+        sync_state = load_json_file(sync_path, {})
+        if not isinstance(sync_state, dict) or sync_state.get("version") != 1:
+            sync_state = {"version": 1, "repositories": {}}
+        repositories = sync_state.get("repositories")
+        if not isinstance(repositories, dict):
+            repositories = {}
+            sync_state["repositories"] = repositories
+        if repositories.get(repository_fingerprint) != "auto":
+            repositories[repository_fingerprint] = "auto"
+            atomic_write_json(sync_path, sync_state)
+    finally:
+        release_lock(lock_path)
+    return project_id
+
+
+def project_scope_sync_pending(cwd: str | None) -> bool:
+    """判断自动跨机器范围是否仍在等待服务端解析。"""
+    root = git_root(cwd)
+    if _mapped_project_id(root, load_json_file(project_mapping_path(), {})) is not None:
+        return False
+    repository_fingerprint = _repository_remote_fingerprint(root)
+    credential_fingerprint = _current_credential_fingerprint()
+    if repository_fingerprint is None or credential_fingerprint is None:
+        return False
+    synchronized = _server_project_id(
+        load_json_file(server_project_scopes_path(), {}),
+        repository_fingerprint,
+        credential_fingerprint,
+    )
+    return synchronized is None and _project_sync_mode(repository_fingerprint) == "auto"
+
+
+def maybe_auto_sync_project_scope(cwd: str | None, enabled: bool = True) -> str:
+    """为新仓库首次自动获取范围；旧范围必须由用户明确迁移。"""
+    if not enabled:
+        return ""
+    root = git_root(cwd)
+    if _mapped_project_id(root, load_json_file(project_mapping_path(), {})) is not None:
+        return ""
+    repository_fingerprint = _repository_remote_fingerprint(root)
+    if repository_fingerprint is None:
+        return ""
+    credential_fingerprint = _current_credential_fingerprint()
+    if credential_fingerprint is None:
+        return ""
+    synchronized = _server_project_id(
+        load_json_file(server_project_scopes_path(), {}),
+        repository_fingerprint,
+        credential_fingerprint,
+    )
+    if synchronized is not None:
+        return ""
+    mode = _ensure_project_sync_mode(root, repository_fingerprint)
+    if mode == "legacy":
+        return (
+            "检测到此仓库已有本机项目范围，插件不会自动切换或迁移旧记忆；"
+            "确认改用跨机器范围后，请运行 `mem0:switch-project`。"
+        )
+    try:
+        sync_project_scope(str(root))
+    except Exception as exc:
+        log_error(f"自动同步项目范围失败 {type(exc).__name__}")
+        return (
+            "自动获取跨机器项目范围失败；本次会话暂用本机范围读取，"
+            "记忆写入已暂停，后续启动会自动重试。"
+        )
+    return ""
 
 
 def resolve_branch(cwd: str | None) -> str:
@@ -837,8 +1142,11 @@ def _apply_settings_layer(settings: dict[str, Any], raw: Any, source: str) -> No
         if key not in DEFAULT_SETTINGS:
             unknown += 1
             continue
+        if key == "auto_sync_project" and source.startswith("mem0.md"):
+            unknown += 1
+            continue
         try:
-            if key in {"auto_save", "auto_search", "rerank", "debug"}:
+            if key in {"auto_save", "auto_search", "auto_sync_project", "rerank", "debug"}:
                 parsed = _boolean(value)
                 if parsed is None:
                     raise ValueError
@@ -898,9 +1206,16 @@ def debug_event(settings: dict[str, Any], code: str) -> None:
 
 
 def structured_results(result: dict[str, Any]) -> list[dict[str, Any]]:
-    structured = result.get("structuredContent")
-    if isinstance(structured, dict) and isinstance(structured.get("results"), list):
+    structured = structured_payload(result)
+    if isinstance(structured.get("results"), list):
         return [item for item in structured["results"] if isinstance(item, dict)]
+    return []
+
+
+def structured_payload(result: dict[str, Any]) -> dict[str, Any]:
+    structured = result.get("structuredContent")
+    if isinstance(structured, dict):
+        return structured
     for block in result.get("content", []):
         if not isinstance(block, dict) or block.get("type") != "text":
             continue
@@ -908,9 +1223,9 @@ def structured_results(result: dict[str, Any]) -> list[dict[str, Any]]:
             parsed = json.loads(block.get("text", ""))
         except json.JSONDecodeError:
             continue
-        if isinstance(parsed, dict) and isinstance(parsed.get("results"), list):
-            return [item for item in parsed["results"] if isinstance(item, dict)]
-    return []
+        if isinstance(parsed, dict):
+            return parsed
+    return {}
 
 
 def format_context(result: dict[str, Any], limit: int = 5) -> str:
@@ -2281,11 +2596,18 @@ def handle_pre_tool(
     project_id: str,
     settings: dict[str, Any] | None = None,
     policy: dict[str, Any] | None = None,
+    scope_sync_pending: bool = False,
 ) -> None:
     tool_name = str(hook_input.get("tool_name", ""))
     tool_input = hook_input.get("tool_input", {})
     operation = normalized_tool_name(tool_name)
     if operation in MEM0_TOOL_NAMES and isinstance(tool_input, dict):
+        if operation in MUTATING_TOOLS and scope_sync_pending:
+            emit_pretool_denied(
+                "跨机器项目范围尚未同步，已暂停记忆写入；恢复连接后请重新启动任务，"
+                "或明确关闭自动同步后使用本机范围。"
+            )
+            return
         if operation == "add_memory":
             updated = dict(tool_input)
             changed = False
@@ -2319,7 +2641,11 @@ def handle_pre_tool(
             else:
                 emit("PreToolUse")
             return
-        should_add_project = operation not in {"list_entities", "delete_entities"}
+        should_add_project = operation not in {
+            "list_entities",
+            "delete_entities",
+            "resolve_project_scope",
+        }
         if operation == "delete_entities":
             should_add_project = tool_input.get("entity_type") == "run"
         if should_add_project and not tool_input.get("project_id"):
@@ -2385,12 +2711,22 @@ def handle_post_tool(
 
 def _handle_event(hook_input: dict[str, Any]) -> None:
     event = str(hook_input.get("hook_event_name", ""))
-    project_id = resolve_project_id(hook_input.get("cwd"))
     policy = parse_mem0_md(hook_input.get("cwd"))
     settings = load_settings(hook_input.get("cwd"), policy)
+    sync_notice = ""
+    if event == "SessionStart":
+        sync_notice = maybe_auto_sync_project_scope(
+            hook_input.get("cwd"),
+            bool(settings.get("auto_sync_project", True)),
+        )
+    project_id = resolve_project_id(hook_input.get("cwd"))
+    scope_sync_pending = (
+        bool(settings.get("auto_sync_project", True))
+        and project_scope_sync_pending(hook_input.get("cwd"))
+    )
 
     if event == "PreToolUse":
-        handle_pre_tool(hook_input, project_id, settings, policy)
+        handle_pre_tool(hook_input, project_id, settings, policy, scope_sync_pending)
         return
 
     if event == "PostToolUse":
@@ -2400,12 +2736,14 @@ def _handle_event(hook_input: dict[str, Any]) -> None:
     if event == "SessionStart":
         source = str(hook_input.get("source", ""))
         scope_notice = project_scope_notice(hook_input.get("cwd"))
-        if source in {"startup", "clear"}:
+        if sync_notice:
+            scope_notice = "\n".join(filter(None, (sync_notice, scope_notice)))
+        if source in {"startup", "clear"} and not scope_sync_pending:
             try:
                 auto_import_project_files(hook_input.get("cwd"), project_id)
             except Exception as exc:
                 log_error(f"自动导入项目资料失败 {type(exc).__name__}")
-        if source == "compact" and settings.get("auto_save", True):
+        if source == "compact" and settings.get("auto_save", True) and not scope_sync_pending:
             transcript = str(hook_input.get("transcript_path", "")).strip()
             compact_summary = extract_compact_summary(transcript) if transcript else ""
             if compact_summary:
@@ -2452,6 +2790,10 @@ def _handle_event(hook_input: dict[str, Any]) -> None:
         return
 
     if event in {"Stop", "PreCompact"}:
+        if scope_sync_pending:
+            debug_event(settings, "project_scope_sync_pending")
+            emit(event)
+            return
         transcript = str(hook_input.get("transcript_path", "")).strip()
         exchange, files = extract_transcript(transcript) if transcript else ("", [])
         if not exchange:
@@ -2610,7 +2952,13 @@ def main() -> int:
             )
             return 2
 
-    if "--set-project" in sys.argv or "--clear-project" in sys.argv or "--current-project" in sys.argv:
+    project_commands = {
+        "--set-project",
+        "--clear-project",
+        "--current-project",
+        "--sync-project",
+    }
+    if project_commands.intersection(sys.argv):
         try:
             cwd = None
             if "--cwd" in sys.argv:
@@ -2622,13 +2970,21 @@ def main() -> int:
                 action = "已设置"
             elif "--clear-project" in sys.argv:
                 project_id = set_project_mapping(cwd, None)
-                action = "已恢复自动识别"
+                action = "已清除本机项目覆盖"
+            elif "--sync-project" in sys.argv:
+                synchronized_project = sync_project_scope(cwd)
+                project_id = resolve_project_id(cwd)
+                action = "已同步服务端项目范围"
             else:
                 project_id = resolve_project_id(cwd)
                 action = "当前范围"
-            print(json.dumps({"状态": action, "project_id": project_id}, ensure_ascii=True))
+            status = project_scope_status(cwd)
+            status.update({"状态": action, "project_id": project_id})
+            if "--sync-project" in sys.argv:
+                status["server_project_id"] = synchronized_project
+            print(json.dumps(status, ensure_ascii=True))
             return 0
-        except (IndexError, OSError, TimeoutError, ValueError) as exc:
+        except (IndexError, OSError, RuntimeError, TimeoutError, ValueError) as exc:
             error = redact_sensitive(str(exc)) or type(exc).__name__
             print(json.dumps({"状态": "失败", "错误": error}, ensure_ascii=True), file=sys.stderr)
             return 2

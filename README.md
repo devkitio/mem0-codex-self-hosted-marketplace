@@ -24,12 +24,12 @@
 
 | 层级 | 已提供能力 |
 | --- | --- |
-| MCP | 10 个工具，覆盖新增、搜索、分页读取、详情、更新、单条删除、历史、实体枚举和两阶段批量管理 |
+| MCP | 11 个工具，覆盖私有项目范围解析、新增、搜索、分页读取、详情、更新、单条删除、历史、实体枚举和两阶段批量管理 |
 | 生命周期钩子 | `PreToolUse`、`SessionStart`、`UserPromptSubmit`、`PostToolUse`、`Stop`、`PreCompact` 六类事件 |
 | 系统兼容性 | Windows 使用 `python` 与 `commandWindows`，Linux/macOS 使用 `python3`；CI 在三种系统分别验证 |
 | 技能 | 16 个自托管技能，覆盖初始化、健康检查、记住、查看、置顶、遗忘、整理、导入导出、项目切换和统计 |
 | 项目策略 | 原生解析 `mem0.md` 的 `Settings/Search/Ignore/Identity/Categories/Retention` 六个区段 |
-| 自动记忆 | 智能多查询检索、真实 rerank、质量门禁、90 天默认保留、分类保留、压缩后摘要和跨事件去重 |
+| 自动记忆 | 新仓库跨机器范围自动解析、智能多查询检索、真实 rerank、质量门禁、90 天默认保留、分类保留、压缩后摘要和跨事件去重 |
 | 安全 | MCP 专用 Key、固定用户与所有者、强制项目边界、敏感信息脱敏、项目内相对路径、批量删除默认关闭 |
 
 旧版 6 个 MCP 工具保持参数兼容；当前插件和未升级的旧客户端仍可继续使用基础读写能力。
@@ -42,7 +42,7 @@
 | --- | --- | --- |
 | 服务地址 | Mem0 官方 API/MCP | 固定为仓库配置的自托管 MCP |
 | 认证 | `MEM0_API_KEY` 等云端凭据 | 只使用自部署控制台生成且用途为 MCP 的 `MEM0_SELF_HOSTED_API_KEY` |
-| 工具数量 | 官方 9 个主要记忆工具 | 官方语义对应工具加 `get_memory_history`，共 10 个 |
+| 工具数量 | 官方 9 个主要记忆工具 | 官方语义对应工具加历史读取和私有项目范围解析，共 11 个 |
 | 身份范围 | 云端账号、用户与应用语义 | 服务端固定用户和所有者，客户端只选择项目或运行范围 |
 | 实体目录 | 官方云端实体目录 | 从当前 Adapter 管理的记忆推导项目和运行实体 |
 | 搜索与列表 | 由官方云端控制 | 项目查询包含当前项目与全局记忆，精确读取和修改必须匹配项目 |
@@ -138,16 +138,19 @@ sudo install -m 0644 services/mem0-mcp/test_adapter.py /data/mem0Mcp/test_adapte
 
 ### 4. 生成 Secret 与运行配置
 
-以下四个 Secret 应分别随机生成，`mem0_internal_service_key` 与 `mcp_confirmation_secret` 不能相同：
+以下五个 Secret 应分别随机生成；三个 MCP Adapter Secret 必须两两不同：
 
 ```bash
 sudo sh -c 'umask 077; openssl rand -hex 32 > /data/mem0-runtime/secrets/postgres_password'
 sudo sh -c 'umask 077; openssl rand -hex 32 > /data/mem0-runtime/secrets/mem0_jwt_secret'
 sudo sh -c 'umask 077; openssl rand -hex 32 > /data/mem0Mcp/secrets/mem0_internal_service_key'
 sudo sh -c 'umask 077; openssl rand -hex 32 > /data/mem0Mcp/secrets/mcp_confirmation_secret'
+sudo sh -c 'umask 077; openssl rand -hex 32 > /data/mem0Mcp/secrets/mcp_project_scope_secret'
 sudo chown 10001:10001 /data/mem0-runtime/secrets/* /data/mem0Mcp/secrets/*
 sudo chmod 0400 /data/mem0-runtime/secrets/* /data/mem0Mcp/secrets/*
 ```
+
+`mcp_project_scope_secret` 用于从认证主体与 Git 仓库指纹派生稳定的私有 `project_id`。开始使用跨机器同步后必须长期保留并加密备份；丢失或替换它会让新同步的客户端得到不同范围，旧记忆不会自动迁移。`mcp_confirmation_secret` 可按删除确认策略轮换，但不能复用为项目范围 Secret。
 
 再分别创建以下单行文件，不要加引号，也不要把真实值写进 Git、终端历史、工单或截图：
 
@@ -304,9 +307,9 @@ curl --fail https://mem0-api.example.com/api/health
 - `/data/mem0-runtime/secrets` 与 `/data/mem0Mcp/secrets`：使用独立加密介质备份，不得提交 Git。
 - 当前 Git 提交、物化清单和三个镜像发布标识。
 
-升级前先执行 PostgreSQL 一致性备份并记录当前镜像标识。拉取新提交后，在新的空目录重新物化和测试，构建新的不可变镜像；只有验证通过后才更新 `compose.env` 中的三个镜像标识并执行 `docker compose up -d --no-build`。回滚时恢复旧镜像标识；如果新版本已经执行不可逆数据库迁移，还必须按对应版本的数据库方案恢复备份，不能只回滚容器。
+升级前先执行 PostgreSQL 一致性备份并记录当前镜像标识。首次升级到包含 `resolve_project_scope` 的版本时，必须先按第 4 步创建并备份 `mcp_project_scope_secret`，否则新 Adapter 会拒绝启动。拉取新提交后，在新的空目录重新物化和测试，构建新的不可变镜像；只有验证通过后才更新 `compose.env` 中的三个镜像标识并执行 `docker compose up -d --no-build`。回滚时恢复旧镜像标识；如果新版本已经执行不可逆数据库迁移，还必须按对应版本的数据库方案恢复备份，不能只回滚容器。
 
-仓库不包含生产数据和 Secret，因此只备份 Git 仓库不足以灾难恢复。
+仓库不包含生产数据和 Secret，因此只备份 Git 仓库不足以灾难恢复。尤其不能丢失 `mcp_project_scope_secret`，否则无法继续为同一用户和仓库派生原有项目范围。
 
 ## Codex 插件安装
 
@@ -317,7 +320,7 @@ curl --fail https://mem0-api.example.com/api/health
 - Windows 可执行 `python --version`
 - macOS/Linux 可执行 `python3 --version`
 
-插件运行时只使用 Python 标准库，路径、文件锁、原子状态写入和 UTF-8 数据均兼容 Windows、Linux 与 macOS。项目标识与生产 MCP 保持一致，只允许 1～64 位字母、数字、点、下划线或连字符；自动识别会在本机按只读 Git 远端身份隔离同名仓库，跨机器或多个克隆共享记忆时必须通过 `switch-project` 设置相同的明确 ID。
+插件运行时只使用 Python 标准库，路径、文件锁、原子状态写入和 UTF-8 数据均兼容 Windows、Linux 与 macOS。项目标识与生产 MCP 保持一致，只允许 1～64 位字母、数字、点、下划线或连字符。没有旧范围的新 Git 仓库会在首次 `SessionStart` 自动获取私有跨机器范围；已有本机范围的旧仓库保持不变并提示迁移确认。两种情况都不会在公开仓库写入 `project_id`。
 
 在自部署 Mem0 控制台生成并保存一个用途为“Codex MCP（受限）”的新 API Key，然后设置为 `MEM0_SELF_HOSTED_API_KEY`。管理员 REST API Key 不能连接 MCP，MCP Key 也不能访问 `/configure`、`/memories`、`/reset` 等管理员接口。Windows PowerShell 可持久写入当前用户环境：
 
@@ -360,14 +363,14 @@ Codex 不会自动信任第三方钩子；插件更新并改变钩子内容后�
 
 ### 4. 验证连接
 
-在新的 Codex 任务中运行 `$mem0:health`。该检查会核对令牌、10 个工具、生产契约以及最小读写链路，不会输出令牌或完整记忆正文；用户明确要求“深度检查”时，还会只读审查重复、陈旧和低置信度记忆。
+在新的 Codex 任务中运行 `$mem0:health`。该检查会核对令牌、11 个工具、生产契约以及最小读写链路，不会输出令牌或完整记忆正文；用户明确要求“深度检查”时，还会只读审查重复、陈旧和低置信度记忆。
 
 ## 钩子行为
 
 | 钩子 | 触发时机 | Mem0 行为 |
 | --- | --- | --- |
 | `PreToolUse` | 读取、编辑或调用 Mem0 工具前 | 按工具语义补齐 `project_id`；为 `add_memory` 补充受控 metadata；保护托管记忆文件，并按文件路径检索历史 |
-| `SessionStart` | 启动、恢复或压缩后 | 检索项目目标、决定、待办和偏好；压缩后提取并保存真实 `isCompactSummary` 摘要 |
+| `SessionStart` | 启动、恢复或压缩后 | 首次自动解析新仓库的跨机器范围，检索项目目标、决定、待办和偏好；压缩后提取并保存真实 `isCompactSummary` 摘要 |
 | `UserPromptSubmit` | 每次提交提示 | 跳过纯确认和忽略项；复杂请求并发执行 2～4 个互补查询并去重 |
 | `PostToolUse` | Mem0 或命令工具结束后 | 记录会话统计；检测命令错误并检索历史解决记录 |
 | `Stop` | 每轮助手输出结束 | 通过质量门禁后提取长期记忆，并按保留策略设置过期时间 |
@@ -379,12 +382,13 @@ Codex 不会自动信任第三方钩子；插件更新并改变钩子内容后�
 
 ## 本地设置与 `mem0.md`
 
-插件默认启用自动检索和自动保存。设置按“内置默认值 → 项目 `mem0.md` → 本机 `settings.json` → 环境变量”的顺序覆盖，仓库不能覆盖用户的本机选择。本机设置文件位于 `~/.codex/plugin-data/mem0-self-hosted/settings.json`；也可通过 `PLUGIN_DATA` 改变数据目录。
+插件默认启用项目范围自动同步、自动检索和自动保存。设置按“内置默认值 → 项目 `mem0.md` → 本机 `settings.json` → 环境变量”的顺序覆盖，仓库不能覆盖用户的本机选择。本机设置文件位于 `~/.codex/plugin-data/mem0-self-hosted/settings.json`；也可通过 `PLUGIN_DATA` 改变数据目录。安全相关的 `auto_sync_project` 只接受本机设置和环境变量，项目 `mem0.md` 中的同名项会被忽略。
 
 ```json
 {
   "auto_save": true,
   "auto_search": true,
+  "auto_sync_project": true,
   "search_limit": 5,
   "confidence_threshold": 0.25,
   "rerank": true,
@@ -393,7 +397,7 @@ Codex 不会自动信任第三方钩子；插件更新并改变钩子内容后�
 }
 ```
 
-对应环境变量为 `MEM0_AUTO_SAVE`、`MEM0_AUTO_SEARCH`、`MEM0_SEARCH_LIMIT`、`MEM0_CONFIDENCE_THRESHOLD`、`MEM0_RERANK`、`MEM0_DEBUG` 和 `MEM0_SESSION_RETENTION_DAYS`。`search_limit` 会限制在 1～20，阈值限制在 0～1，保留天数限制在 0～3650；保留天数为 0 时不写入过期时间，非零值按服务端要求写为 `YYYY-MM-DD`。
+对应环境变量为 `MEM0_AUTO_SAVE`、`MEM0_AUTO_SEARCH`、`MEM0_AUTO_SYNC_PROJECT`、`MEM0_SEARCH_LIMIT`、`MEM0_CONFIDENCE_THRESHOLD`、`MEM0_RERANK`、`MEM0_DEBUG` 和 `MEM0_SESSION_RETENTION_DAYS`。通常无需额外配置；只有希望始终使用本机范围时才设置 `MEM0_AUTO_SYNC_PROJECT=false`。`search_limit` 会限制在 1～20，阈值限制在 0～1，保留天数限制在 0～3650；保留天数为 0 时不写入过期时间，非零值按服务端要求写为 `YYYY-MM-DD`。
 
 可用插件脚本初始化或查看本机设置，不需要手工创建 JSON：
 
@@ -401,12 +405,16 @@ Codex 不会自动信任第三方钩子；插件更新并改变钩子内容后�
 python plugins\mem0\scripts\mem0_self_hosted.py --init-settings
 python plugins\mem0\scripts\mem0_self_hosted.py --show-settings --cwd "D:\你的项目"
 python plugins\mem0\scripts\mem0_self_hosted.py --current-project --cwd "D:\你的项目"
+python plugins\mem0\scripts\mem0_self_hosted.py --sync-project --cwd "D:\你的项目"
+python plugins\mem0\scripts\mem0_self_hosted.py --clear-project --cwd "D:\你的项目"
 ```
 
 ```bash
 python3 plugins/mem0/scripts/mem0_self_hosted.py --init-settings
 python3 plugins/mem0/scripts/mem0_self_hosted.py --show-settings --cwd "/你的项目"
 python3 plugins/mem0/scripts/mem0_self_hosted.py --current-project --cwd "/你的项目"
+python3 plugins/mem0/scripts/mem0_self_hosted.py --sync-project --cwd "/你的项目"
+python3 plugins/mem0/scripts/mem0_self_hosted.py --clear-project --cwd "/你的项目"
 ```
 
 项目根目录的 `mem0.md` 可使用六个二级标题。未知标题和字段会被安全忽略，解析失败会回退到默认行为：
@@ -459,13 +467,13 @@ python3 plugins/mem0/scripts/mem0_self_hosted.py --current-project --cwd "/你�
 | `$mem0:peek` / `$mem0:tour` | 快速查询或浏览当前项目记忆 |
 | `$mem0:pin` / `$mem0:forget` | 置顶关键记忆或在确认后删除单条记忆 |
 | `$mem0:memory-reviewer` / `$mem0:dream` | 审查重复、矛盾和陈旧内容并进行整理 |
-| `$mem0:switch-project` | 将当前工作区持久映射到指定 `project_id` |
+| `$mem0:switch-project` | 临时切换项目范围、确认旧范围迁移或强制刷新跨机器范围 |
 
-`switch-project` 技能会把工作区到 `project_id` 的映射保存在插件数据目录中，因此切换结果可跨任务生效且不会修改仓库；映射值必须符合生产 MCP 的 1～64 位字符规则，也可以随时恢复为运行时自动识别。
+`switch-project` 的普通切换会把工作区映射保存在本机插件数据目录。新克隆首次启动时，客户端自动规范化 Git 远端并只发送 SHA-256 指纹，MCP 使用当前认证用户的稳定 `subject` 与长期 `MCP_PROJECT_SCOPE_SECRET` 派生私有 `project_id`。结果按“连接凭据指纹 + 仓库指纹”隔离写入本机 `server_project_scopes.json`，不保存原始 Key；缓存命中后不重复调用范围解析。同一 Mem0 用户在其他机器克隆同一远端后首次启动即可得到相同范围。客户端 Key 可以轮换，只要仍属于同一用户；新 Key 会重新解析一次，不会复用其他凭据的缓存。
 
-自动范围只承诺本机防碰撞：第一个目录名继续沿用旧 ID，同名但远端不同的后续仓库会获得带哈希的隔离 ID。旧目录名范围里的记忆可能已经混合，插件不会自动迁移或删除；需要跨机器或多个克隆共享时，应在每个副本上显式映射到同一个项目 ID。
+解析优先级为本机显式映射、服务端同步范围、本机自动范围。已有本机范围的旧仓库不会自动切换，`--current-project` 会返回 `migration_required=true`；确认后运行 `--sync-project`，该命令也可强制刷新当前 Key 的缓存。没有 Git 远端时继续使用完整的本机范围；服务暂时不可用时只保留本机读取，并暂停自动导入、会话总结和所有 Mem0 变更工具，避免后续切换服务端范围后形成两套记忆，后续启动会自动重试。需要明确使用可写本机范围时，可设置 `auto_sync_project=false`。`--clear-project` 会清除当前工作区的显式映射和所有凭据下的对应同步缓存，下次启动重新解析。旧范围里的记忆不会自动迁移或删除。
 
-自托管服务现提供 10 个工具：旧 6 个工具保持兼容，并增加 `get_memory_history`、`list_entities`、`delete_all_memories` 和 `delete_entities`。同时支持受限 metadata/filters、分页、过期时间和真实 rerank。项目与运行实体从受管记忆推导，不等同于官方云端实体目录；搜索通过一次受限查询同时覆盖当前项目和全局范围，再按分数返回结果。
+自托管服务现提供 11 个工具：旧 6 个工具保持兼容，并增加 `get_memory_history`、`list_entities`、`resolve_project_scope`、`delete_all_memories` 和 `delete_entities`。同时支持受限 metadata/filters、分页、过期时间和真实 rerank。项目与运行实体从受管记忆推导，不等同于官方云端实体目录；搜索通过一次受限查询同时覆盖当前项目和全局范围，再按分数返回结果。
 
 两个批量工具在插件配置中默认禁用。需要使用时必须由用户明确启用，并遵循“预览 → 明确确认 → 5 分钟 HMAC 令牌执行”的流程；服务端持久化删除进度，同一令牌只恢复未完成操作或返回既有结果，不支持用户级或全局清空。
 
@@ -517,7 +525,7 @@ python plugins\mem0\scripts\mem0_self_hosted.py --check
 python3 plugins/mem0/scripts/mem0_self_hosted.py --check
 ```
 
-该命令不仅核对 10 个工具，还会把生产 `tools/list` 的参数、必填项、类型、默认值、枚举和四项 `ToolAnnotations` 与仓库快照比较；发现漂移时返回失败，但不会输出令牌或记忆正文。
+该命令不仅核对 11 个工具，还会把生产 `tools/list` 的参数、必填项、类型、默认值、枚举和四项 `ToolAnnotations` 与仓库快照比较；发现漂移时返回失败，但不会输出令牌或记忆正文。
 
 GitHub Actions 会在 Ubuntu、Windows 和 macOS 上分别执行仓库校验与完整单元测试。
 
@@ -529,7 +537,7 @@ Linux 任务还会安装 `services/mem0-mcp/requirements.lock` 并运行 Adapter
 - 完整生命周期脚本单元测试，覆盖三系统路径语义、恢复状态机和安全边界。
 - 生产 `messages + infer=true`、metadata、到期日和 rerank 探针。
 - `update_memory` metadata 合并、置顶取消和单条清理探针。
-- 生产 10 工具契约与 `mcp-schema.snapshot.json` 一致性检查。
+- 生产 11 工具契约与 `mcp-schema.snapshot.json` 一致性检查。
 
 ## 许可证与来源
 

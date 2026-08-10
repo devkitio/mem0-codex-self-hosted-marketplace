@@ -111,6 +111,14 @@
       "enums": {"entity_type": ["project", "run"]},
       "annotations": {"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false}
     },
+    "resolve_project_scope": {
+      "properties": ["repository_fingerprint"],
+      "required": ["repository_fingerprint"],
+      "types": {"repository_fingerprint": ["string"]},
+      "defaults": {},
+      "enums": {},
+      "annotations": {"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false}
+    },
     "search_memories": {
       "properties": ["explain", "filters", "project_id", "query", "rerank", "show_expired", "threshold", "top_k"],
       "required": ["query"],

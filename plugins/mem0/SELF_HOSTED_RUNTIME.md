@@ -21,6 +21,7 @@
 - `delete_memory(memory_id, project_id?)`
 - `get_memory_history(memory_id, project_id?)`
 - `list_entities(entity_type?, project_id?, show_expired?)`
+- `resolve_project_scope(repository_fingerprint)`
 - `delete_all_memories(project_id, run_id?, confirmation_token?)`
 - `delete_entities(entity_type, entity_id, project_id?, confirmation_token?)`
 
@@ -29,12 +30,16 @@
 ## 身份与项目边界
 
 - 服务端通过部署配置固定 `user_id` 和 `mcp_owner`，客户端不可获知或覆盖具体值。不得传入或尝试覆盖 `user_id`、`agent_id`、`app_id`、`mcp_owner`、`scope`、`source`。
-- 项目标识只允许 1～64 位字母、数字、点、下划线或连字符。自动范围优先使用当前 Git 根目录名；目录名不符合规则时生成 `project-<哈希>` 标识。同一台机器检测到同名但远端身份不同的仓库时，第一个范围保持不变，后续仓库使用带身份哈希的隔离 ID，并在 `SessionStart` 提示旧范围不会自动迁移。自动范围只保证本机防碰撞；跨机器或多个副本需要共享记忆时，必须用 `switch-project` 为它们显式设置同一个稳定 ID。
+- 项目标识只允许 1～64 位字母、数字、点、下划线或连字符。自动范围优先使用当前 Git 根目录名；目录名不符合规则时生成 `project-<哈希>` 标识。同一台机器检测到同名但远端身份不同的仓库时，第一个范围保持不变，后续仓库使用带身份哈希的隔离 ID，并在 `SessionStart` 提示旧范围不会自动迁移。
+- `SessionStart` 默认为没有本机旧范围的新 Git 仓库自动解析跨机器范围。客户端规范化 Git 远端并只发送 64 位小写 SHA-256 指纹；MCP 从认证上下文读取稳定 `subject`，使用独立长期 `MCP_PROJECT_SCOPE_SECRET` 执行 HMAC-SHA256，并只返回合法的私有 `project_id`。不得访问或转发访问令牌正文。
+- 同一 Mem0 用户的不同 MCP Key、不同机器和同一远端的 SSH/HTTPS 表示会得到相同范围。派生结果按当前连接凭据的不可逆指纹隔离缓存到本机 `server_project_scopes.json`；原始 Key、仓库地址和 `project_id` 都不写入业务仓库或插件仓库。缓存命中时不得重复请求范围解析；Key 变化时必须重新解析，不能复用其他凭据的缓存。
+- 已存在本机自动范围的旧仓库不得静默切换或迁移，启动时返回 `migration_required=true` 并提示用户通过 `switch-project` 确认。解析失败时本次会话只保留本机读取，暂停自动导入、会话总结和全部 Mem0 变更工具，后续启动重试，避免写入稍后会失去可见性的临时范围。无 Git 远端时使用完整的本机范围；可由本机设置或 `MEM0_AUTO_SYNC_PROJECT=false` 关闭自动解析并明确恢复可写本机范围，项目 `mem0.md` 不得控制该安全选项。
+- 解析优先级固定为本机显式映射、服务端同步范围、本机自动范围。`--sync-project` 用于旧范围迁移确认或强制刷新；`--clear-project` 同时清除当前工作区的显式映射和所有凭据下对应的远端同步缓存，但不删除任何记忆。
 - 项目搜索和列表可以返回当前项目及全局记忆；精确读取、历史、更新和单条删除必须匹配传入的项目范围。
 - `metadata` 和 `filters` 只用于非保留业务字段，并受服务端的大小、深度、字段和操作符限制。保留 metadata 字段为 `user_id`、`agent_id`、`app_id`、`mcp_owner`、`scope`、`project_id`、`source`、`run_id`；从读取结果再次写入前必须全部剔除。顶层 `run_id` 仍可在 `add_memory` 中使用。不要在客户端拼入身份过滤条件。
 - `list_entities` 只枚举从受管记忆推导出的 `project` 和 `run`。列出全部项目时不要传 `project_id`；列出运行时传入所属项目。
 
-生命周期脚本只在语义明确时补齐项目范围：普通读写、历史和 `delete_all_memories` 补当前项目；`delete_entities(entity_type="run")` 补当前项目；`list_entities` 与项目实体删除不自动补项目，避免把跨项目枚举或目标项目错误限缩。
+生命周期脚本只在语义明确时补齐项目范围：普通读写、历史和 `delete_all_memories` 补当前项目；`delete_entities(entity_type="run")` 补当前项目；`list_entities`、`resolve_project_scope` 与项目实体删除不自动补项目，避免把跨项目枚举、范围解析或目标项目错误限缩。
 
 ## 生命周期设置与项目策略
 
@@ -42,13 +47,14 @@
 
 - `auto_save=true`
 - `auto_search=true`
+- `auto_sync_project=true`；仅本机设置和环境变量可覆盖，项目 `mem0.md` 中的同名项无效
 - `search_limit=5`，有效范围 1～20
 - `confidence_threshold=0.25`，有效范围 0～1
 - `rerank=true`；自动检索默认使用服务端真实 rerank
 - `debug=false`；只记录决策代码和错误类型，不记录提示、记忆正文或路径
 - `session_retention_days=90`，有效范围 0～3650；0 表示不设置 `expiration_date`，非零值按服务端要求写为 `YYYY-MM-DD`
 
-环境变量使用对应的 `MEM0_AUTO_SAVE`、`MEM0_AUTO_SEARCH`、`MEM0_SEARCH_LIMIT`、`MEM0_CONFIDENCE_THRESHOLD`、`MEM0_RERANK`、`MEM0_DEBUG` 和 `MEM0_SESSION_RETENTION_DAYS`。可通过 `scripts/mem0_self_hosted.py --init-settings` 创建默认本机设置，用 `--show-settings [--cwd 路径]` 查看合并后的有效值，或用 `--current-project [--cwd 路径]` 读取运行时最终解析的 `project_id`。
+环境变量使用对应的 `MEM0_AUTO_SAVE`、`MEM0_AUTO_SEARCH`、`MEM0_AUTO_SYNC_PROJECT`、`MEM0_SEARCH_LIMIT`、`MEM0_CONFIDENCE_THRESHOLD`、`MEM0_RERANK`、`MEM0_DEBUG` 和 `MEM0_SESSION_RETENTION_DAYS`。可通过 `scripts/mem0_self_hosted.py --init-settings` 创建默认本机设置，用 `--show-settings [--cwd 路径]` 查看合并后的有效值，用 `--current-project [--cwd 路径]` 读取最终 `project_id`、来源、同步状态与迁移状态，或用 `--sync-project [--cwd 路径]` 确认旧范围迁移或强制刷新私有跨机器范围。
 
 `mem0.md` 原生识别 `## Settings`、`## Search`、`## Ignore`、`## Identity`、`## Categories` 和 `## Retention`。规则只是当前项目的本地策略，不得改变服务端固定用户、所有者和项目隔离：
 
@@ -60,7 +66,7 @@
 
 复杂提示最多产生四个确定性查询，客户端并发请求后按记忆 ID 去重；单个查询失败允许使用其他查询的结果。纯确认、寒暄、命中 `Ignore` 的提示不会触发检索。自动总结只有在包含决定、目标、完成事项、验证、风险、待办、文件触达等长期价值信号时才写入；使用 `messages=[{"role":"assistant",...}]` 防止把模型观点误归因给用户，并写入 `type/confidence/session_id/branch/files_touched` 等非保留 metadata。`files_touched` 必须是项目内相对路径，普通文本和 JSON 形式的凭据必须先脱敏；会话计数和摘要去重状态必须在文件锁内合并更新，摘要哈希与正文哈希去重键必须按 `project_id` 隔离，`Stop`、`PreCompact` 与压缩后 `SessionStart` 只在同一项目内去重。
 
-仓库中的 `mcp-schema.snapshot.json` 固定 10 个工具的参数、必填项、类型、默认值、枚举和四项 `ToolAnnotations`。`scripts/mem0_self_hosted.py --check` 必须实时比较生产 `tools/list`；差异只报告工具或字段名，不输出 schema 正文、令牌或记忆内容。
+仓库中的 `mcp-schema.snapshot.json` 固定 11 个工具的参数、必填项、类型、默认值、枚举和四项 `ToolAnnotations`。`scripts/mem0_self_hosted.py --check` 必须实时比较生产 `tools/list`；差异只报告工具或字段名，不输出 schema 正文、令牌或记忆内容。
 
 ## 破坏性操作
 
