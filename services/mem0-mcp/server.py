@@ -16,6 +16,7 @@ from typing import Any, Literal
 
 import httpx
 from mcp.server.auth.provider import AccessToken
+from mcp.server.auth.middleware.auth_context import get_access_token
 from mcp.server.auth.settings import AuthSettings
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
@@ -51,11 +52,22 @@ def _secret(name: str, minimum_length: int = 32, maximum_length: int = 512) -> s
     return value
 
 
-def _validate_runtime_secrets(internal_key: str, confirmation_secret: str) -> None:
-    if not internal_key or not confirmation_secret:
-        raise RuntimeError("必须配置 MEM0_INTERNAL_SERVICE_KEY 和 MCP_CONFIRMATION_SECRET")
-    if hmac.compare_digest(internal_key.encode("utf-8"), confirmation_secret.encode("utf-8")):
-        raise RuntimeError("内部服务 Key 与删除确认 Secret 必须使用不同值")
+def _validate_runtime_secrets(
+    internal_key: str,
+    confirmation_secret: str,
+    project_scope_secret: str,
+) -> None:
+    secrets = (internal_key, confirmation_secret, project_scope_secret)
+    if not all(secrets):
+        raise RuntimeError(
+            "必须配置 MEM0_INTERNAL_SERVICE_KEY、MCP_CONFIRMATION_SECRET 和 MCP_PROJECT_SCOPE_SECRET"
+        )
+    if any(
+        hmac.compare_digest(left.encode("utf-8"), right.encode("utf-8"))
+        for index, left in enumerate(secrets)
+        for right in secrets[index + 1 :]
+    ):
+        raise RuntimeError("内部服务、删除确认与项目范围 Secret 必须两两不同")
 
 
 def _env_int(name: str, default: int, minimum: int, maximum: int) -> int:
@@ -80,6 +92,7 @@ def _identity_env(name: str) -> str:
 MEM0_BASE_URL = os.environ.get("MEM0_BASE_URL", "http://mem0:8000").rstrip("/")
 INTERNAL_SERVICE_KEY = _secret("MEM0_INTERNAL_SERVICE_KEY")
 CONFIRMATION_SECRET = _secret("MCP_CONFIRMATION_SECRET")
+PROJECT_SCOPE_SECRET = _secret("MCP_PROJECT_SCOPE_SECRET")
 DEFAULT_USER_ID = _identity_env("MEM0_DEFAULT_USER_ID")
 OWNER = _identity_env("MCP_OWNER")
 TIMEOUT = max(5.0, min(float(os.environ.get("MEM0_TIMEOUT_SECONDS", "45")), 120.0))
@@ -134,7 +147,7 @@ FILTER_OPERATORS = {"eq", "ne", "in", "nin", "gt", "gte", "lt", "lte", "contains
 HTTP_CLIENT: httpx.AsyncClient | None = None
 UPSTREAM_SEMAPHORE: asyncio.Semaphore | None = None
 
-_validate_runtime_secrets(INTERNAL_SERVICE_KEY, CONFIRMATION_SECRET)
+_validate_runtime_secrets(INTERNAL_SERVICE_KEY, CONFIRMATION_SECRET, PROJECT_SCOPE_SECRET)
 
 
 class InvalidMem0APIKey(ValueError):
@@ -228,6 +241,24 @@ def _project(value: str | None) -> str | None:
     if not PROJECT_RE.fullmatch(value):
         raise ValueError("project_id 必须为 1-64 位字母、数字、点、下划线或连字符")
     return value
+
+
+def _repository_fingerprint(value: str) -> str:
+    if not isinstance(value, str) or not HASH_RE.fullmatch(value):
+        raise ValueError("repository_fingerprint 必须是 64 位小写十六进制 SHA-256")
+    return value
+
+
+def _project_scope_id(subject: str, repository_fingerprint: str) -> str:
+    if not isinstance(subject, str) or not subject:
+        raise RuntimeError("MCP 认证上下文缺少有效主体")
+    material = (
+        b"mem0-project-scope-v1\0"
+        + subject.encode("utf-8")
+        + b"\0"
+        + bytes.fromhex(_repository_fingerprint(repository_fingerprint))
+    )
+    return hmac.new(PROJECT_SCOPE_SECRET.encode("utf-8"), material, hashlib.sha256).hexdigest()
 
 
 def _entity_id(value: str | None, field: str) -> str | None:
@@ -1075,6 +1106,19 @@ async def add_memory(
         run_id=run_id,
     )
     return {"ok": True, "results": [_clean(item) for item in rows]}
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False)
+)
+async def resolve_project_scope(repository_fingerprint: str) -> dict[str, str]:
+    """为当前认证主体和 Git 仓库指纹解析私有、稳定的项目范围。"""
+    repository_fingerprint = _repository_fingerprint(repository_fingerprint)
+    access_token = get_access_token()
+    subject = access_token.subject if access_token is not None else None
+    if not isinstance(subject, str) or not subject:
+        raise RuntimeError("MCP 认证上下文缺少有效主体")
+    return {"project_id": _project_scope_id(subject, repository_fingerprint)}
 
 
 @mcp.tool(

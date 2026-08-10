@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import logging
 import os
 import unittest
@@ -9,6 +10,7 @@ import httpx
 
 os.environ.setdefault("MEM0_INTERNAL_SERVICE_KEY", "test-internal-service-key-0123456789")
 os.environ.setdefault("MCP_CONFIRMATION_SECRET", "test-confirmation-secret-9876543210")
+os.environ.setdefault("MCP_PROJECT_SCOPE_SECRET", "test-project-scope-secret-0123456789")
 os.environ.setdefault("MEM0_DEFAULT_USER_ID", "unit-test-user")
 os.environ.setdefault("MCP_OWNER", "unit-test-adapter")
 os.environ.setdefault("MCP_ALLOWED_HOSTS", "mem0-api.example.com,127.0.0.1:*,localhost:*,mem0-mcp:*")
@@ -36,8 +38,10 @@ class AdapterValidationTests(unittest.TestCase):
             ), self.assertRaisesRegex(RuntimeError, error):
                 server._secret("UNIT_TEST_SECRET")
         self.assertEqual(server._secret("MEM0_INTERNAL_SERVICE_KEY"), server.INTERNAL_SERVICE_KEY)
-        with self.assertRaisesRegex(RuntimeError, "不同值"):
-            server._validate_runtime_secrets("x" * 32, "x" * 32)
+        with self.assertRaisesRegex(RuntimeError, "不同"):
+            server._validate_runtime_secrets("x" * 32, "x" * 32, "z" * 32)
+        with self.assertRaisesRegex(RuntimeError, "不同"):
+            server._validate_runtime_secrets("x" * 32, "y" * 32, "y" * 32)
 
     def test_internal_identity_must_be_explicit_and_valid(self):
         for value in ("", "contains spaces", "-invalid-prefix", "x" * 129):
@@ -297,6 +301,41 @@ class AdapterAsyncTests(unittest.IsolatedAsyncioTestCase):
         server.UPSTREAM_SEMAPHORE = None
         await self.client.aclose()
 
+    async def test_project_scope_is_stable_private_and_subject_isolated(self):
+        fingerprint = hashlib.sha256(b"github.com/team/project").hexdigest()
+        first_subject = str(uuid.uuid4())
+        second_subject = str(uuid.uuid4())
+        first_token = server.AccessToken(
+            token="not-observed",
+            client_id="first",
+            subject=first_subject,
+            scopes=["mem0:mcp"],
+        )
+        second_token = server.AccessToken(
+            token="not-observed",
+            client_id="second",
+            subject=second_subject,
+            scopes=["mem0:mcp"],
+        )
+
+        with patch.object(server, "get_access_token", return_value=first_token):
+            first = await server.resolve_project_scope(fingerprint)
+            repeated = await server.resolve_project_scope(fingerprint)
+        with patch.object(server, "get_access_token", return_value=second_token):
+            second = await server.resolve_project_scope(fingerprint)
+
+        self.assertEqual(first, repeated)
+        self.assertRegex(first["project_id"], r"^[0-9a-f]{64}$")
+        self.assertNotEqual(first, second)
+        self.assertNotIn(first_subject, first["project_id"])
+
+    async def test_project_scope_rejects_invalid_fingerprint_or_missing_subject(self):
+        with self.assertRaisesRegex(ValueError, "SHA-256"):
+            await server.resolve_project_scope("A" * 64)
+        with patch.object(server, "get_access_token", return_value=None):
+            with self.assertRaisesRegex(RuntimeError, "认证上下文"):
+                await server.resolve_project_scope("a" * 64)
+
     async def test_request_reuses_shared_client_and_hides_error_body(self):
         self.assertEqual((await server._request("GET", "/ok", internal=True))["status"], "ok")
         self.assertEqual((await server._request("GET", "/ok", internal=True))["status"], "ok")
@@ -325,6 +364,7 @@ class AdapterAsyncTests(unittest.IsolatedAsyncioTestCase):
                 await verifier.verify_token(TEST_API_KEY)
 
     async def test_asgi_bearer_auth_distinguishes_invalid_key_from_upstream_failure(self):
+        fingerprint = hashlib.sha256(b"github.com/team/project").hexdigest()
         payload = {
             "jsonrpc": "2.0",
             "id": 1,
@@ -333,6 +373,15 @@ class AdapterAsyncTests(unittest.IsolatedAsyncioTestCase):
                 "protocolVersion": "2025-06-18",
                 "capabilities": {},
                 "clientInfo": {"name": "adapter-test", "version": "1.0"},
+            },
+        }
+        scope_payload = {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "resolve_project_scope",
+                "arguments": {"repository_fingerprint": fingerprint},
             },
         }
         transport = httpx.ASGITransport(app=server.app, raise_app_exceptions=False)
@@ -364,10 +413,25 @@ class AdapterAsyncTests(unittest.IsolatedAsyncioTestCase):
                         "Authorization": f"Bearer {TEST_UPSTREAM_FAILURE_API_KEY}",
                     },
                 )
+                resolved = await client.post(
+                    "/mcp",
+                    json=scope_payload,
+                    headers={
+                        **headers,
+                        "MCP-Protocol-Version": "2025-06-18",
+                        "Authorization": f"Bearer {TEST_API_KEY}",
+                    },
+                )
         self.assertEqual(accepted.status_code, 200)
         self.assertEqual(rejected.status_code, 401)
         self.assertGreaterEqual(unavailable.status_code, 500)
         self.assertNotEqual(unavailable.status_code, 401)
+        self.assertEqual(resolved.status_code, 200)
+        result = resolved.json()["result"]["structuredContent"]
+        self.assertEqual(
+            result["project_id"],
+            server._project_scope_id("00000000-0000-0000-0000-000000000001", fingerprint),
+        )
 
     async def test_request_keeps_authentication_modes_separate(self):
         await server._request("GET", "/ok", internal=True)

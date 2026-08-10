@@ -8127,7 +8127,7 @@ index 7e382f7c80fdbf91b3ff78ab2a382c119e193076..28ae36a9f1d7e05db1426188fc325917
 +      - POSTGRES_HOST=mem0-postgres
 +      - POSTGRES_PORT=5432
 +      - POSTGRES_DB=postgres
-@@ -28,3 +43,96 @@ services:
+@@ -28,3 +43,98 @@ services:
 -      - JWT_SECRET=${JWT_SECRET}
 -      - AUTH_DISABLED=${AUTH_DISABLED:-false}
 -      - MEM0_TELEMETRY=${MEM0_TELEMETRY:-true}
@@ -8188,10 +8188,12 @@ index 7e382f7c80fdbf91b3ff78ab2a382c119e193076..28ae36a9f1d7e05db1426188fc325917
 +    secrets:
 +      - mem0_internal_service_key
 +      - mcp_confirmation_secret
++      - mcp_project_scope_secret
 +    environment:
 +      - MEM0_BASE_URL=http://mem0:8000
 +      - MEM0_INTERNAL_SERVICE_KEY_FILE=/run/secrets/mem0_internal_service_key
 +      - MCP_CONFIRMATION_SECRET_FILE=/run/secrets/mcp_confirmation_secret
++      - MCP_PROJECT_SCOPE_SECRET_FILE=/run/secrets/mcp_project_scope_secret
 +      - MEM0_DEFAULT_USER_ID=${MEM0_INTERNAL_USER_ID:?必须设置 MEM0_INTERNAL_USER_ID}
 +      - MCP_OWNER=${MEM0_INTERNAL_OWNER:?必须设置 MEM0_INTERNAL_OWNER}
 +      - MEM0_TIMEOUT_SECONDS=45
@@ -8227,7 +8229,7 @@ index 7e382f7c80fdbf91b3ff78ab2a382c119e193076..28ae36a9f1d7e05db1426188fc325917
 +    pids_limit: 64
 +    mem_limit: 256m
 +    cpus: 0.5
-@@ -33,18 +141,28 @@ services:
+@@ -33,18 +143,28 @@ services:
 -      image: pgvector/pgvector:pg17
 -      restart: on-failure
 -      shm_size: "128mb"
@@ -8274,25 +8276,25 @@ index 7e382f7c80fdbf91b3ff78ab2a382c119e193076..28ae36a9f1d7e05db1426188fc325917
 +    cpus: 2.0
 +    security_opt:
 +      - no-new-privileges:true
-@@ -52,0 +171 @@ services:
+@@ -52,0 +173 @@ services:
 +    image: ${MEM0_DASHBOARD_IMAGE:?必须设置 MEM0_DASHBOARD_IMAGE 为带发布标识的 Dashboard 镜像}
-@@ -53,0 +173,2 @@ services:
+@@ -53,0 +175,2 @@ services:
 +    restart: unless-stopped
 +    init: true
-@@ -55 +176 @@ services:
+@@ -55 +178 @@ services:
 -      - "3000:3000"
 +      - "127.0.0.1:${DASHBOARD_HOST_PORT:-3111}:3000"
-@@ -57 +178,2 @@ services:
+@@ -57 +180,2 @@ services:
 -      - mem0_network
 +      - mem0_dashboard
 +      - reverse_proxy_network
-@@ -59 +181 @@ services:
+@@ -59 +183 @@ services:
 -      - NEXT_PUBLIC_API_URL=http://localhost:8888
 +      - NEXT_PUBLIC_API_URL=${MEM0_PUBLIC_API_URL:?必须设置 MEM0_PUBLIC_API_URL}
-@@ -64 +186 @@ services:
+@@ -64 +188 @@ services:
 -        condition: service_started
 +        condition: service_healthy
-@@ -69,0 +192,7 @@ services:
+@@ -69,0 +194,7 @@ services:
 +    pids_limit: 128
 +    mem_limit: 512m
 +    cpus: 1.0
@@ -8300,7 +8302,7 @@ index 7e382f7c80fdbf91b3ff78ab2a382c119e193076..28ae36a9f1d7e05db1426188fc325917
 +      - ALL
 +    security_opt:
 +      - no-new-privileges:true
-@@ -75 +204,25 @@ networks:
+@@ -75 +206,25 @@ networks:
 -  mem0_network:
 +  mem0_data:
 +    driver: bridge
@@ -8327,7 +8329,7 @@ index 7e382f7c80fdbf91b3ff78ab2a382c119e193076..28ae36a9f1d7e05db1426188fc325917
 +          gateway: ${MCP_NETWORK_GATEWAY:?必须设置 MCP_NETWORK_GATEWAY}
 +
 +  mcp_entry:
-@@ -76,0 +230,30 @@ networks:
+@@ -76,0 +232,32 @@ networks:
 +    ipam:
 +      config:
 +        - subnet: ${MCP_ENTRY_SUBNET:?必须设置 MCP_ENTRY_SUBNET}
@@ -8358,6 +8360,8 @@ index 7e382f7c80fdbf91b3ff78ab2a382c119e193076..28ae36a9f1d7e05db1426188fc325917
 +    file: ${MEM0_MCP_ROOT:-/data/mem0Mcp}/secrets/mem0_internal_service_key
 +  mcp_confirmation_secret:
 +    file: ${MEM0_MCP_ROOT:-/data/mem0Mcp}/secrets/mcp_confirmation_secret
++  mcp_project_scope_secret:
++    file: ${MEM0_MCP_ROOT:-/data/mem0Mcp}/secrets/mcp_project_scope_secret
 diff --git a/server/errors.py b/server/errors.py
 index 14d0907bc4d49850eadbf96f64a214e3324cb2b0..3b8ded79f615b09fdd335c2a84b6971f40a92f26 100644
 --- a/server/errors.py
