@@ -19,21 +19,34 @@ ROOT = Path(__file__).resolve().parent.parent
 MANIFEST_PATH = ROOT / "services" / "mem0-server" / "upstream.json"
 GIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+LOCAL_GIT_TIMEOUT_SECONDS = 30
+FETCH_GIT_TIMEOUT_SECONDS = 180
 
 
-def _run(arguments: list[str], cwd: Path) -> str:
+def _run(
+    arguments: list[str],
+    cwd: Path,
+    *,
+    timeout_seconds: int = LOCAL_GIT_TIMEOUT_SECONDS,
+) -> str:
     environment = dict(os.environ)
     environment["GIT_TERMINAL_PROMPT"] = "0"
-    completed = subprocess.run(
-        arguments,
-        cwd=cwd,
-        check=False,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        env=environment,
-    )
+    try:
+        completed = subprocess.run(
+            arguments,
+            cwd=cwd,
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=environment,
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            f"命令执行超时（{arguments[0]}）：超过 {timeout_seconds} 秒"
+        ) from exc
     if completed.returncode != 0:
         details = completed.stderr.strip() or completed.stdout.strip() or "无错误输出"
         raise RuntimeError(f"命令执行失败（{arguments[0]}）：{details}")
@@ -84,6 +97,7 @@ def materialize(target: Path) -> None:
         _run(
             ["git", "fetch", "--quiet", "--depth", "1", "origin", manifest["commit"]],
             temporary,
+            timeout_seconds=FETCH_GIT_TIMEOUT_SECONDS,
         )
         _run(["git", "checkout", "--quiet", "--detach", "FETCH_HEAD"], temporary)
         if _run(["git", "rev-parse", "HEAD"], temporary) != manifest["commit"]:
