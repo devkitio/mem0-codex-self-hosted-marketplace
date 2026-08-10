@@ -28,7 +28,7 @@
 
 ## 身份与项目边界
 
-- 服务端固定 `user_id=codex-primary` 和 `mcp_owner=codex-primary-adapter`。不得传入或尝试覆盖 `user_id`、`agent_id`、`app_id`、`mcp_owner`、`scope`、`source`。
+- 服务端通过部署配置固定 `user_id` 和 `mcp_owner`，客户端不可获知或覆盖具体值。不得传入或尝试覆盖 `user_id`、`agent_id`、`app_id`、`mcp_owner`、`scope`、`source`。
 - 项目标识只允许 1～64 位字母、数字、点、下划线或连字符。自动范围优先使用当前 Git 根目录名；目录名不符合规则时生成 `project-<哈希>` 标识。同一台机器检测到同名但远端身份不同的仓库时，第一个范围保持不变，后续仓库使用带身份哈希的隔离 ID，并在 `SessionStart` 提示旧范围不会自动迁移。自动范围只保证本机防碰撞；跨机器或多个副本需要共享记忆时，必须用 `switch-project` 为它们显式设置同一个稳定 ID。
 - 项目搜索和列表可以返回当前项目及全局记忆；精确读取、历史、更新和单条删除必须匹配传入的项目范围。
 - `metadata` 和 `filters` 只用于非保留业务字段，并受服务端的大小、深度、字段和操作符限制。保留 metadata 字段为 `user_id`、`agent_id`、`app_id`、`mcp_owner`、`scope`、`project_id`、`source`、`run_id`；从读取结果再次写入前必须全部剔除。顶层 `run_id` 仍可在 `add_memory` 中使用。不要在客户端拼入身份过滤条件。

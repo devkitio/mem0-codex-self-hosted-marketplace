@@ -176,7 +176,7 @@ index 454313886be029d68c0de5e18886d39f3b82d5bc..fabfc7ef20666bc872424c4e798aeb4c
 +            _append_equality(conditions, params, key, value)
 diff --git a/openresty/api-proxy.conf b/openresty/api-proxy.conf
 new file mode 100644
-index 0000000000000000000000000000000000000000..d32b868171dd8f93c61674fe53452429755a8d5c
+index 0000000000000000000000000000000000000000..cf9bac9225a01e75b145302939b7d42d4803f5c1
 --- /dev/null
 +++ b/openresty/api-proxy.conf
 @@ -0,0 +1,74 @@
@@ -189,7 +189,7 @@ index 0000000000000000000000000000000000000000..d32b868171dd8f93c61674fe53452429
 +}
 +
 +location = /api/health {
-+    include /www/sites/mem0-api.jiang.in/proxy/cloudflare_real_ip.inc;
++    include /etc/nginx/mem0/cloudflare_real_ip.inc;
 +    proxy_pass http://127.0.0.1:8888/api/readyz;
 +    proxy_http_version 1.1;
 +    proxy_set_header Host $host;
@@ -208,7 +208,7 @@ index 0000000000000000000000000000000000000000..d32b868171dd8f93c61674fe53452429
 +}
 +
 +location = /auth/login {
-+    include /www/sites/mem0-api.jiang.in/proxy/cloudflare_real_ip.inc;
++    include /etc/nginx/mem0/cloudflare_real_ip.inc;
 +    proxy_pass http://127.0.0.1:8888;
 +    proxy_http_version 1.1;
 +    proxy_set_header Host $host;
@@ -228,7 +228,7 @@ index 0000000000000000000000000000000000000000..d32b868171dd8f93c61674fe53452429
 +}
 +
 +location ^~ / {
-+    include /www/sites/mem0-api.jiang.in/proxy/cloudflare_real_ip.inc;
++    include /etc/nginx/mem0/cloudflare_real_ip.inc;
 +    proxy_pass http://127.0.0.1:8888;
 +    proxy_http_version 1.1;
 +    proxy_set_header Host $host;
@@ -286,12 +286,12 @@ index 0000000000000000000000000000000000000000..c849561a2a4cbb5f2323bdd2e8979c79
 +real_ip_recursive on;
 diff --git a/openresty/dashboard-proxy.conf b/openresty/dashboard-proxy.conf
 new file mode 100644
-index 0000000000000000000000000000000000000000..58ab8e227ace57ccec40f728712dfd08e62e5d1b
+index 0000000000000000000000000000000000000000..2e25d6a31814f1a82aa47051762ca526cf4c2d80
 --- /dev/null
 +++ b/openresty/dashboard-proxy.conf
 @@ -0,0 +1,16 @@
 +location ^~ / {
-+    include /www/sites/mem0.jiang.in/proxy/cloudflare_real_ip.inc;
++    include /etc/nginx/mem0/cloudflare_real_ip.inc;
 +    proxy_pass http://127.0.0.1:3111;
 +    proxy_http_version 1.1;
 +    proxy_set_header Host $host;
@@ -308,12 +308,12 @@ index 0000000000000000000000000000000000000000..58ab8e227ace57ccec40f728712dfd08
 +}
 diff --git a/openresty/mcp.conf b/openresty/mcp.conf
 new file mode 100644
-index 0000000000000000000000000000000000000000..b1d1b154bfa465f5879502b942b9bc2134550bb5
+index 0000000000000000000000000000000000000000..f70f4818d172c3435e83f5ee4be64331c548012f
 --- /dev/null
 +++ b/openresty/mcp.conf
 @@ -0,0 +1,33 @@
 +location = /mcp {
-+    include /www/sites/mem0-api.jiang.in/proxy/cloudflare_real_ip.inc;
++    include /etc/nginx/mem0/cloudflare_real_ip.inc;
 +    proxy_pass http://127.0.0.1:8890/mcp;
 +    proxy_http_version 1.1;
 +    proxy_set_header Host $host;
@@ -347,18 +347,18 @@ index 0000000000000000000000000000000000000000..b1d1b154bfa465f5879502b942b9bc21
 +}
 diff --git a/openresty/mem0-api.site.conf b/openresty/mem0-api.site.conf
 new file mode 100644
-index 0000000000000000000000000000000000000000..78c66b161fe3038929454313125f31ecd29fd052
+index 0000000000000000000000000000000000000000..708eeed3bd44db2a6884a8d1e90e6b3650d8f01b
 --- /dev/null
 +++ b/openresty/mem0-api.site.conf
-@@ -0,0 +1,36 @@
+@@ -0,0 +1,37 @@
 +server {
 +    listen 80 ;
 +    listen 443 ssl ;
 +    listen 443 quic ;
-+    server_name mem0-api.jiang.in;
++    server_name mem0-api.example.com;
 +    index index.php index.html index.htm default.php default.htm default.html;
-+    access_log /www/sites/mem0-api.jiang.in/log/access.log mem0_privacy;
-+    error_log /www/sites/mem0-api.jiang.in/log/error.log crit;
++    access_log /var/log/nginx/mem0-api.access.log mem0_privacy;
++    error_log /var/log/nginx/mem0-api.error.log crit;
 +    location ~ ^/(\.user.ini|\.htaccess|\.git|\.env|\.svn|\.project|LICENSE|README.md) {
 +        return 404;
 +    }
@@ -369,13 +369,13 @@ index 0000000000000000000000000000000000000000..78c66b161fe3038929454313125f31ec
 +    if ( $uri ~ "^/\.well-known/.*\.(php|jsp|py|js|css|lua|ts|go|zip|tar\.gz|rar|7z|sql|bak)$" ) {
 +        return 403;
 +    }
-+    root /www/sites/mem0-api.jiang.in/index;
++    root /var/www/mem0-api;
 +    http2 on;
 +    if ($scheme = http) {
 +        return 301 https://$host$request_uri;
 +    }
-+    ssl_certificate /www/sites/mem0-api.jiang.in/ssl/fullchain.pem;
-+    ssl_certificate_key /www/sites/mem0-api.jiang.in/ssl/privkey.pem;
++    ssl_certificate /etc/letsencrypt/live/mem0-api.example.com/fullchain.pem;
++    ssl_certificate_key /etc/letsencrypt/live/mem0-api.example.com/privkey.pem;
 +    ssl_protocols TLSv1.3 TLSv1.2;
 +    ssl_ciphers ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384:DHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-SHA384:ECDHE-RSA-AES128-SHA256:!aNULL:!eNULL:!EXPORT:!DSS:!DES:!RC4:!3DES:!MD5:!PSK:!KRB5:!SRP:!CAMELLIA:!SEED;
 +    ssl_prefer_server_ciphers off;
@@ -385,21 +385,22 @@ index 0000000000000000000000000000000000000000..78c66b161fe3038929454313125f31ec
 +    proxy_set_header X-Forwarded-Proto https;
 +    add_header Strict-Transport-Security "max-age=31536000";
 +    add_header Alt-Svc 'h3=":443"; ma=2592000';
-+    include /www/sites/mem0-api.jiang.in/proxy/*.conf;
++    include /etc/nginx/mem0/api-proxy.conf;
++    include /etc/nginx/mem0/mcp.conf;
 +}
 diff --git a/openresty/mem0-dashboard.site.conf b/openresty/mem0-dashboard.site.conf
 new file mode 100644
-index 0000000000000000000000000000000000000000..2edf5fb7c91c1303fb9b0ecdf445782e645db87f
+index 0000000000000000000000000000000000000000..66cccffd0dd1857b27a158c40ac43a5b388641f3
 --- /dev/null
 +++ b/openresty/mem0-dashboard.site.conf
 @@ -0,0 +1,34 @@
 +server {
 +    listen 80 ;
 +    listen 443 ssl ;
-+    server_name mem0.jiang.in;
++    server_name mem0.example.com;
 +    index index.php index.html index.htm default.php default.htm default.html;
-+    access_log /www/sites/mem0.jiang.in/log/access.log mem0_privacy;
-+    error_log /www/sites/mem0.jiang.in/log/error.log crit;
++    access_log /var/log/nginx/mem0-dashboard.access.log mem0_privacy;
++    error_log /var/log/nginx/mem0-dashboard.error.log crit;
 +    location ~ ^/(\.user.ini|\.htaccess|\.git|\.env|\.svn|\.project|LICENSE|README.md) {
 +        return 404;
 +    }
@@ -410,13 +411,13 @@ index 0000000000000000000000000000000000000000..2edf5fb7c91c1303fb9b0ecdf445782e
 +    if ( $uri ~ "^/\.well-known/.*\.(php|jsp|py|js|css|lua|ts|go|zip|tar\.gz|rar|7z|sql|bak)$" ) {
 +        return 403;
 +    }
-+    root /www/sites/mem0.jiang.in/index;
++    root /var/www/mem0-dashboard;
 +    http2 on;
 +    if ($scheme = http) {
 +        return 301 https://$host$request_uri;
 +    }
-+    ssl_certificate /www/sites/mem0.jiang.in/ssl/fullchain.pem;
-+    ssl_certificate_key /www/sites/mem0.jiang.in/ssl/privkey.pem;
++    ssl_certificate /etc/letsencrypt/live/mem0.example.com/fullchain.pem;
++    ssl_certificate_key /etc/letsencrypt/live/mem0.example.com/privkey.pem;
 +    ssl_protocols TLSv1.3 TLSv1.2;
 +    ssl_ciphers ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384:DHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-SHA384:ECDHE-RSA-AES128-SHA256:!aNULL:!eNULL:!EXPORT:!DSS:!DES:!RC4:!3DES:!MD5:!PSK:!KRB5:!SRP:!CAMELLIA:!SEED;
 +    ssl_prefer_server_ciphers off;
@@ -425,16 +426,16 @@ index 0000000000000000000000000000000000000000..2edf5fb7c91c1303fb9b0ecdf445782e
 +    error_page 497 https://$host$request_uri;
 +    proxy_set_header X-Forwarded-Proto https;
 +    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains";
-+    include /www/sites/mem0.jiang.in/proxy/*.conf;
++    include /etc/nginx/mem0/dashboard-proxy.conf;
 +}
 diff --git a/openresty/mem0-logrotate b/openresty/mem0-logrotate
 new file mode 100644
-index 0000000000000000000000000000000000000000..fac189a809f7331f61db6bd942ae58c93901ef35
+index 0000000000000000000000000000000000000000..193ac4fa9473fc2856002df665816566a43c2c12
 --- /dev/null
 +++ b/openresty/mem0-logrotate
 @@ -0,0 +1,16 @@
-+/opt/1panel/www/sites/mem0-api.jiang.in/log/*.log
-+/opt/1panel/www/sites/mem0.jiang.in/log/*.log
++/var/log/nginx/mem0-api.*.log
++/var/log/nginx/mem0-dashboard.*.log
 +{
 +    daily
 +    rotate 7
@@ -446,7 +447,7 @@ index 0000000000000000000000000000000000000000..fac189a809f7331f61db6bd942ae58c9
 +    sharedscripts
 +    create 0600 root root
 +    postrotate
-+        docker exec 1Panel-openresty-TEwG nginx -s reopen >/dev/null 2>&1 || true
++        nginx -s reopen >/dev/null 2>&1 || true
 +    endscript
 +}
 diff --git a/openresty/mem0_privacy.conf b/openresty/mem0_privacy.conf
@@ -483,7 +484,7 @@ index 0000000000000000000000000000000000000000..148b54a1ab03c46165695e5893cd7d7d
 +limit_req_zone $binary_remote_addr zone=mem0_api_perip:10m rate=10r/s;
 +limit_req_zone $binary_remote_addr zone=mem0_login_perip:10m rate=10r/m;
 diff --git a/server/.env.example b/server/.env.example
-index 3e44034ad5beec72965a90ce9671509b87f6a36d..c75afbc2bc6875b66a025719711c9a95fab08efc 100644
+index 3e44034ad5beec72965a90ce9671509b87f6a36d..4ec0abb0961a2df7eec20a27db6dd5ab7b161ab7 100644
 --- a/server/.env.example
 +++ b/server/.env.example
 @@ -1 +1,8 @@
@@ -506,28 +507,55 @@ index 3e44034ad5beec72965a90ce9671509b87f6a36d..c75afbc2bc6875b66a025719711c9a95
 +MEM0_DASHBOARD_IMAGE=mem0-local/mem0-dashboard:<发布标识>
 +MEM0_MCP_ROOT=/data/mem0Mcp
 +MEM0_RUNTIME_ROOT=/data/mem0-runtime
-@@ -7 +17 @@ OPENAI_API_KEY=
+@@ -7 +17,28 @@ OPENAI_API_KEY=
 -# Postgres — POSTGRES_PASSWORD is required; docker-compose will not start without it.
++# 生产身份必须稳定且由部署者显式指定；开始写入数据后不要修改。
++MEM0_INTERNAL_USER_ID=mem0-user
++MEM0_INTERNAL_OWNER=mem0-mcp-adapter
++
++# 公网入口和 MCP Host/Origin 白名单。
++MEM0_PUBLIC_API_URL=https://mem0-api.example.com
++MEM0_DASHBOARD_URL=https://mem0.example.com
++MCP_ALLOWED_HOSTS=mem0-api.example.com,127.0.0.1:*,localhost:*,mem0-mcp:*
++MCP_ALLOWED_ORIGINS=https://mem0-api.example.com
++
++# 只信任实际反向代理来源；容器化代理应填写其真实网关或容器网段。
++MEM0_FORWARDED_ALLOW_IPS=127.0.0.1
++
++# 内部网段必须与宿主机现有 Docker 网络不冲突。
++MEM0_DATA_SUBNET=172.30.0.0/24
++MEM0_DATA_GATEWAY=172.30.0.1
++MEM0_DASHBOARD_SUBNET=172.30.1.0/24
++MEM0_DASHBOARD_GATEWAY=172.30.1.1
++MCP_NETWORK_SUBNET=172.30.2.0/24
++MCP_NETWORK_GATEWAY=172.30.2.1
++MCP_ENTRY_SUBNET=172.30.3.0/24
++MCP_ENTRY_GATEWAY=172.30.3.1
++
++# 必须替换为已经存在的反向代理和模型网关外部网络。
++REVERSE_PROXY_NETWORK_NAME=reverse-proxy
++MODEL_GATEWAY_NETWORK_NAME=model-gateway
++
 +# PostgreSQL。直接运行时必须设置密码；生产 Compose 改从 secret 文件读取。
-@@ -13 +23 @@ POSTGRES_PASSWORD=
+@@ -13 +50 @@ POSTGRES_PASSWORD=
 -POSTGRES_COLLECTION_NAME=memories
-+POSTGRES_COLLECTION_NAME=memories_qwen37_1024
-@@ -17 +27 @@ JWT_SECRET=
++POSTGRES_COLLECTION_NAME=memories_1024
+@@ -17 +54 @@ JWT_SECRET=
 -# Local development only. Leave false in production.
 +# 仅本地开发可启用；生产环境必须保持 false。
-@@ -22,4 +32,2 @@ APP_DB_NAME=mem0_app
+@@ -22,9 +59,2 @@ APP_DB_NAME=mem0_app
 -# Default LLM and embedder models. Provider must be in BUNDLED_*_PROVIDERS
 -# (see server/main.py). Override to pin a specific model without editing code.
 -MEM0_DEFAULT_LLM_MODEL=gpt-5-mini
 -MEM0_DEFAULT_EMBEDDER_MODEL=text-embedding-3-small
-+# 自托管生产环境默认关闭匿名遥测。
-+MEM0_TELEMETRY=false
-@@ -27,7 +35 @@ MEM0_DEFAULT_EMBEDDER_MODEL=text-embedding-3-small
+-
 -# Anonymous telemetry. Sends a single onboarding event per install
 -# (install UUID, email domain, server version, source). No PII.
 -# Set to false to opt out.
 -MEM0_TELEMETRY=true
--
++# 自托管生产环境默认关闭匿名遥测。
++MEM0_TELEMETRY=false
+@@ -32,2 +62 @@ MEM0_TELEMETRY=true
 -# Days of request_logs history to keep when `make prune-logs` runs.
 -# Wire the prune command into cron/systemd in production.
 +# 请求日志保留天数；生产环境需定期执行清理脚本。
@@ -8047,7 +8075,7 @@ index a142374b083af5e919d1ded7e2f83392652eccf7..5f271bff6aa20f9b334db3cd8823f767
 +def _render_database_url() -> str:
 +    return _build_database_url().render_as_string(hide_password=False)
 diff --git a/server/docker-compose.yaml b/server/docker-compose.yaml
-index 7e382f7c80fdbf91b3ff78ab2a382c119e193076..772ec864d846b063154cfa6e4b7c181bf774cbb4 100644
+index 7e382f7c80fdbf91b3ff78ab2a382c119e193076..28ae36a9f1d7e05db1426188fc325917d88e13ee 100644
 --- a/server/docker-compose.yaml
 +++ b/server/docker-compose.yaml
 @@ -1 +1 @@
@@ -8071,7 +8099,7 @@ index 7e382f7c80fdbf91b3ff78ab2a382c119e193076..772ec864d846b063154cfa6e4b7c181b
 +      - mem0_data
 +      - mem0_dashboard
 +      - mcp_network
-+      - sub2api_network
++      - model_gateway_network
 @@ -15,7 +21,14 @@ services:
 -      - ./history:/app/history
 -      - .:/app
@@ -8085,7 +8113,7 @@ index 7e382f7c80fdbf91b3ff78ab2a382c119e193076..772ec864d846b063154cfa6e4b7c181b
 +        target: /app/history
 +        bind:
 +          create_host_path: false
-+    command: ["sh", "-c", "test -w /app/history && { test ! -e /app/history/history.db || test -w /app/history/history.db; } || { echo '错误：/app/history 或 history.db 不可写' >&2; exit 1; }; python scripts/backfill_mcp_scope.py --apply && alembic upgrade head && exec uvicorn main:app --host 0.0.0.0 --port 8000 --proxy-headers --forwarded-allow-ips=${MEM0_FORWARDED_ALLOW_IPS:-127.0.0.1,192.168.144.1,192.168.64.1,192.168.112.1,172.20.0.1,172.22.0.1} --no-access-log --limit-concurrency 64 --timeout-keep-alive 5"]
++    command: ["sh", "-c", "test -w /app/history && { test ! -e /app/history/history.db || test -w /app/history/history.db; } || { echo '错误：/app/history 或 history.db 不可写' >&2; exit 1; }; python scripts/backfill_mcp_scope.py --apply && alembic upgrade head && exec uvicorn main:app --host 0.0.0.0 --port 8000 --proxy-headers --forwarded-allow-ips=${MEM0_FORWARDED_ALLOW_IPS:?必须设置 MEM0_FORWARDED_ALLOW_IPS} --no-access-log --limit-concurrency 64 --timeout-keep-alive 5"]
 +    secrets:
 +      - postgres_password
 +      - mem0_jwt_secret
@@ -8103,7 +8131,7 @@ index 7e382f7c80fdbf91b3ff78ab2a382c119e193076..772ec864d846b063154cfa6e4b7c181b
 -      - JWT_SECRET=${JWT_SECRET}
 -      - AUTH_DISABLED=${AUTH_DISABLED:-false}
 -      - MEM0_TELEMETRY=${MEM0_TELEMETRY:-true}
-+      - POSTGRES_COLLECTION_NAME=memories_qwen37_1024
++      - POSTGRES_COLLECTION_NAME=${POSTGRES_COLLECTION_NAME:?必须设置 POSTGRES_COLLECTION_NAME}
 +      - HISTORY_DB_PATH=/app/history/history.db
 +      - POSTGRES_PASSWORD_FILE=/run/secrets/postgres_password
 +      - JWT_SECRET_FILE=/run/secrets/mem0_jwt_secret
@@ -8113,8 +8141,8 @@ index 7e382f7c80fdbf91b3ff78ab2a382c119e193076..772ec864d846b063154cfa6e4b7c181b
 +      - EMBEDDING_API_BASE_FILE=/run/secrets/embedding_api_base
 +      - AUTH_DISABLED=false
 +      - MEM0_INTERNAL_SERVICE_KEY_FILE=/run/secrets/mem0_internal_service_key
-+      - MEM0_INTERNAL_USER_ID=codex-primary
-+      - MEM0_INTERNAL_OWNER=codex-primary-adapter
++      - MEM0_INTERNAL_USER_ID=${MEM0_INTERNAL_USER_ID:?必须设置 MEM0_INTERNAL_USER_ID}
++      - MEM0_INTERNAL_OWNER=${MEM0_INTERNAL_OWNER:?必须设置 MEM0_INTERNAL_OWNER}
 +      - MEM0_INTERNAL_ALLOWED_HOSTS=mem0,127.0.0.1,localhost
 +      - MEM0_INTERNAL_SCAN_LIMIT=5000
 +      - MEM0_MCP_BACKFILL_BATCH_SIZE=500
@@ -8123,7 +8151,7 @@ index 7e382f7c80fdbf91b3ff78ab2a382c119e193076..772ec864d846b063154cfa6e4b7c181b
 +      - MEM0_MCP_DELETE_AUDIT_RETENTION_SECONDS=86400
 +      - MEM0_READINESS_CACHE_SECONDS=5
 +      - MEM0_TELEMETRY=false
-+      - DASHBOARD_URL=${MEM0_DASHBOARD_URL:-https://mem0.jiang.in}
++      - DASHBOARD_URL=${MEM0_DASHBOARD_URL:?必须设置 MEM0_DASHBOARD_URL}
 +    depends_on:
 +      postgres:
 +        condition: service_healthy
@@ -8164,8 +8192,8 @@ index 7e382f7c80fdbf91b3ff78ab2a382c119e193076..772ec864d846b063154cfa6e4b7c181b
 +      - MEM0_BASE_URL=http://mem0:8000
 +      - MEM0_INTERNAL_SERVICE_KEY_FILE=/run/secrets/mem0_internal_service_key
 +      - MCP_CONFIRMATION_SECRET_FILE=/run/secrets/mcp_confirmation_secret
-+      - MEM0_DEFAULT_USER_ID=codex-primary
-+      - MCP_OWNER=codex-primary-adapter
++      - MEM0_DEFAULT_USER_ID=${MEM0_INTERNAL_USER_ID:?必须设置 MEM0_INTERNAL_USER_ID}
++      - MCP_OWNER=${MEM0_INTERNAL_OWNER:?必须设置 MEM0_INTERNAL_OWNER}
 +      - MEM0_TIMEOUT_SECONDS=45
 +      - MCP_READ_TIMEOUT_SECONDS=12
 +      - MCP_MAX_TEXT_LENGTH=12000
@@ -8178,8 +8206,8 @@ index 7e382f7c80fdbf91b3ff78ab2a382c119e193076..772ec864d846b063154cfa6e4b7c181b
 +      - MCP_MAX_UPSTREAM_RESPONSE_BYTES=1000000
 +      - MCP_MAX_CONCURRENT_UPSTREAM=16
 +      - MCP_CONFIRMATION_TTL_SECONDS=300
-+      - MCP_ALLOWED_HOSTS=${MCP_ALLOWED_HOSTS:-mem0-api.jiang.in,127.0.0.1:*,localhost:*,mem0-mcp:*}
-+      - MCP_ALLOWED_ORIGINS=${MCP_ALLOWED_ORIGINS:-https://mem0-api.jiang.in}
++      - MCP_ALLOWED_HOSTS=${MCP_ALLOWED_HOSTS:?必须设置 MCP_ALLOWED_HOSTS}
++      - MCP_ALLOWED_ORIGINS=${MCP_ALLOWED_ORIGINS:?必须设置 MCP_ALLOWED_ORIGINS}
 +    depends_on:
 +      mem0:
 +        condition: service_healthy
@@ -8257,10 +8285,10 @@ index 7e382f7c80fdbf91b3ff78ab2a382c119e193076..772ec864d846b063154cfa6e4b7c181b
 @@ -57 +178,2 @@ services:
 -      - mem0_network
 +      - mem0_dashboard
-+      - onepanel_network
++      - reverse_proxy_network
 @@ -59 +181 @@ services:
 -      - NEXT_PUBLIC_API_URL=http://localhost:8888
-+      - NEXT_PUBLIC_API_URL=${MEM0_PUBLIC_API_URL:-https://mem0-api.jiang.in}
++      - NEXT_PUBLIC_API_URL=${MEM0_PUBLIC_API_URL:?必须设置 MEM0_PUBLIC_API_URL}
 @@ -64 +186 @@ services:
 -        condition: service_started
 +        condition: service_healthy
@@ -8279,39 +8307,39 @@ index 7e382f7c80fdbf91b3ff78ab2a382c119e193076..772ec864d846b063154cfa6e4b7c181b
 +    internal: true
 +    ipam:
 +      config:
-+        - subnet: ${MEM0_DATA_SUBNET:-192.168.144.0/20}
-+          gateway: ${MEM0_DATA_GATEWAY:-192.168.144.1}
++        - subnet: ${MEM0_DATA_SUBNET:?必须设置 MEM0_DATA_SUBNET}
++          gateway: ${MEM0_DATA_GATEWAY:?必须设置 MEM0_DATA_GATEWAY}
 +
 +  mem0_dashboard:
 +    driver: bridge
 +    internal: true
 +    ipam:
 +      config:
-+        - subnet: ${MEM0_DASHBOARD_SUBNET:-192.168.64.0/20}
-+          gateway: ${MEM0_DASHBOARD_GATEWAY:-192.168.64.1}
++        - subnet: ${MEM0_DASHBOARD_SUBNET:?必须设置 MEM0_DASHBOARD_SUBNET}
++          gateway: ${MEM0_DASHBOARD_GATEWAY:?必须设置 MEM0_DASHBOARD_GATEWAY}
 +
 +  mcp_network:
 +    driver: bridge
 +    internal: true
 +    ipam:
 +      config:
-+        - subnet: ${MCP_NETWORK_SUBNET:-192.168.112.0/20}
-+          gateway: ${MCP_NETWORK_GATEWAY:-192.168.112.1}
++        - subnet: ${MCP_NETWORK_SUBNET:?必须设置 MCP_NETWORK_SUBNET}
++          gateway: ${MCP_NETWORK_GATEWAY:?必须设置 MCP_NETWORK_GATEWAY}
 +
 +  mcp_entry:
 @@ -76,0 +230,30 @@ networks:
 +    ipam:
 +      config:
-+        - subnet: ${MCP_ENTRY_SUBNET:-192.168.128.0/20}
-+          gateway: ${MCP_ENTRY_GATEWAY:-192.168.128.1}
++        - subnet: ${MCP_ENTRY_SUBNET:?必须设置 MCP_ENTRY_SUBNET}
++          gateway: ${MCP_ENTRY_GATEWAY:?必须设置 MCP_ENTRY_GATEWAY}
 +
-+  onepanel_network:
++  reverse_proxy_network:
 +    external: true
-+    name: ${ONEPANEL_NETWORK_NAME:-1panel-network}
++    name: ${REVERSE_PROXY_NETWORK_NAME:?必须设置 REVERSE_PROXY_NETWORK_NAME}
 +
-+  sub2api_network:
++  model_gateway_network:
 +    external: true
-+    name: ${SUB2API_NETWORK_NAME:-sub2api-deploy_sub2api-network}
++    name: ${MODEL_GATEWAY_NETWORK_NAME:?必须设置 MODEL_GATEWAY_NETWORK_NAME}
 +
 +secrets:
 +  postgres_password:
@@ -8368,7 +8396,7 @@ index 14d0907bc4d49850eadbf96f64a214e3324cb2b0..3b8ded79f615b09fdd335c2a84b6971f
 -    logging.exception("Upstream provider error (code=%s)", code)
 +    logging.error("上游服务错误（code=%s，exception_type=%s）", code, type(exc).__name__ if exc else "unknown")
 diff --git a/server/main.py b/server/main.py
-index 20059fb8ed6075f7371f89215cb7990d8566a066..14fa78bbdaee9f18b068c2b1eeefa935f508fe0d 100644
+index 20059fb8ed6075f7371f89215cb7990d8566a066..20ad743feedb8683541b6aca3c99ea4e1837bca3 100644
 --- a/server/main.py
 +++ b/server/main.py
 @@ -1,0 +2,3 @@ import asyncio
@@ -8392,7 +8420,7 @@ index 20059fb8ed6075f7371f89215cb7990d8566a066..14fa78bbdaee9f18b068c2b1eeefa935
 +from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 @@ -22 +30,2 @@ from fastapi.responses import JSONResponse, RedirectResponse
 -from models import RequestLog, User
-+from mcp_scope import derive_mcp_agent_id
++from mcp_scope import derive_mcp_agent_id, validate_mcp_identity
 +from models import MCPDeletionOperation, RequestLog, User
 @@ -39 +48,2 @@ from slowapi.errors import RateLimitExceeded
 -from sqlalchemy import func, select
@@ -8483,10 +8511,14 @@ index 20059fb8ed6075f7371f89215cb7990d8566a066..14fa78bbdaee9f18b068c2b1eeefa935
 +        raise RuntimeError(f"{name} 必须仅包含可见 ASCII 字符")
 +    return value
 +
-@@ -140,0 +163,19 @@ DEFAULT_CONFIG = {
+@@ -140,0 +163,23 @@ DEFAULT_CONFIG = {
 +INTERNAL_SERVICE_KEY = _secret("MEM0_INTERNAL_SERVICE_KEY", minimum_length=32)
-+INTERNAL_USER_ID = os.environ.get("MEM0_INTERNAL_USER_ID", "codex-primary")
-+INTERNAL_OWNER = os.environ.get("MEM0_INTERNAL_OWNER", "codex-primary-adapter")
++INTERNAL_USER_ID = validate_mcp_identity(
++    os.environ.get("MEM0_INTERNAL_USER_ID", ""), "MEM0_INTERNAL_USER_ID"
++)
++INTERNAL_OWNER = validate_mcp_identity(
++    os.environ.get("MEM0_INTERNAL_OWNER", ""), "MEM0_INTERNAL_OWNER"
++)
 +INTERNAL_ALLOWED_HOSTS = {
 +    host.strip().lower()
 +    for host in os.environ.get("MEM0_INTERNAL_ALLOWED_HOSTS", "mem0,mem0-rest-candidate,127.0.0.1,localhost").split(",")
@@ -8503,10 +8535,10 @@ index 20059fb8ed6075f7371f89215cb7990d8566a066..14fa78bbdaee9f18b068c2b1eeefa935
 +_READINESS_LOCK = threading.Lock()
 +_READINESS_CHECKED_AT = 0.0
 +_READINESS_OK = False
-@@ -143 +184 @@ set_session_factory(SessionLocal)
+@@ -143 +188 @@ set_session_factory(SessionLocal)
 -initialize_state(DEFAULT_CONFIG)
 +initialize_state(CUSTOM_CONFIG)
-@@ -179,0 +221,7 @@ class Message(BaseModel):
+@@ -179,0 +225,7 @@ class Message(BaseModel):
 +class InternalMessage(BaseModel):
 +    role: Literal["user", "assistant", "system"]
 +    content: str = Field(..., min_length=1, max_length=50000)
@@ -8514,9 +8546,9 @@ index 20059fb8ed6075f7371f89215cb7990d8566a066..14fa78bbdaee9f18b068c2b1eeefa935
 +    model_config = {"extra": "forbid"}
 +
 +
-@@ -205,0 +254 @@ class SearchRequest(BaseModel):
+@@ -205,0 +258 @@ class SearchRequest(BaseModel):
 +    rerank: Optional[bool] = Field(None, description="Rerank results when a reranker is configured.")
-@@ -209,0 +259,65 @@ class SearchRequest(BaseModel):
+@@ -209,0 +263,65 @@ class SearchRequest(BaseModel):
 +class InternalMemoryQuery(BaseModel):
 +    project_id: Optional[str] = Field(None, pattern=PROJECT_ID_PATTERN)
 +    include_global: bool = False
@@ -8582,7 +8614,7 @@ index 20059fb8ed6075f7371f89215cb7990d8566a066..14fa78bbdaee9f18b068c2b1eeefa935
 +    operation_expires_at: int = Field(..., ge=0, le=4102444800)
 +
 +
-@@ -217,3 +331,5 @@ def _client_error(exc: Exception) -> HTTPException:
+@@ -217,3 +335,5 @@ def _client_error(exc: Exception) -> HTTPException:
 -    detail = str(exc)
 -    status_code = 404 if isinstance(exc, ValueError) and "not found" in detail.lower() else 400
 -    return HTTPException(status_code=status_code, detail=detail)
@@ -8591,7 +8623,7 @@ index 20059fb8ed6075f7371f89215cb7990d8566a066..14fa78bbdaee9f18b068c2b1eeefa935
 +        status_code=404 if not_found else 400,
 +        detail="请求的资源不存在" if not_found else "请求参数无效",
 +    )
-@@ -231,0 +348,745 @@ def _redact_config(value: Any, key: str | None = None) -> Any:
+@@ -231,0 +352,745 @@ def _redact_config(value: Any, key: str | None = None) -> Any:
 +_INTERNAL_FILTER_FIELDS = {"metadata", "run_id", "created_at", "updated_at", "expiration_date"}
 +_INTERNAL_FILTER_LOGICAL = {"AND", "OR", "NOT"}
 +_INTERNAL_FILTER_OPERATORS = {"eq", "ne", "in", "nin", "gt", "gte", "lt", "lte", "contains", "icontains"}
@@ -9337,13 +9369,13 @@ index 20059fb8ed6075f7371f89215cb7990d8566a066..14fa78bbdaee9f18b068c2b1eeefa935
 +    return hmac.compare_digest(_memory_version(item), expected_version)
 +
 +
-@@ -287 +1148 @@ def _persist_request_log(method: str, path: str, status_code: int, latency_ms: f
+@@ -287 +1152 @@ def _persist_request_log(method: str, path: str, status_code: int, latency_ms: f
 -        logging.exception("Failed to persist request log")
 +        logging.warning("请求日志持久化失败")
-@@ -323 +1184 @@ async def log_requests(request: Request, call_next):
+@@ -323 +1188 @@ async def log_requests(request: Request, call_next):
 -def get_config(_auth=Depends(verify_auth)):
 +def get_config(_auth=Depends(require_admin)):
-@@ -326,0 +1188,49 @@ def get_config(_auth=Depends(verify_auth)):
+@@ -326,0 +1192,49 @@ def get_config(_auth=Depends(verify_auth)):
 +@app.get("/api/livez", include_in_schema=False)
 +def api_livez():
 +    return {"status": "ok"}
@@ -9393,32 +9425,32 @@ index 20059fb8ed6075f7371f89215cb7990d8566a066..14fa78bbdaee9f18b068c2b1eeefa935
 +    return _readiness_response()
 +
 +
-@@ -328 +1238 @@ def get_config(_auth=Depends(verify_auth)):
+@@ -328 +1242 @@ def get_config(_auth=Depends(verify_auth)):
 -def list_bundled_providers(_auth=Depends(verify_auth)):
 +def list_bundled_providers(_auth=Depends(require_admin)):
-@@ -341 +1251 @@ def set_config(config: Dict[str, Any], _auth=Depends(require_admin)):
+@@ -341 +1255 @@ def set_config(config: Dict[str, Any], _auth=Depends(require_admin)):
 -def generate_instructions(req: GenerateInstructionsRequest, _auth=Depends(verify_auth)):
 +def generate_instructions(req: GenerateInstructionsRequest, _auth=Depends(require_admin)):
-@@ -368 +1278 @@ def generate_instructions(req: GenerateInstructionsRequest, _auth=Depends(verify
+@@ -368 +1282 @@ def generate_instructions(req: GenerateInstructionsRequest, _auth=Depends(verify
 -def add_memory(memory_create: MemoryCreate, _auth=Depends(verify_auth)):
 +def add_memory(memory_create: MemoryCreate, _auth=Depends(require_admin)):
-@@ -419 +1329 @@ def get_all_memories(
+@@ -419 +1333 @@ def get_all_memories(
 -    _auth=Depends(verify_auth),
 +    _auth=Depends(require_admin),
-@@ -444 +1354 @@ def get_all_memories(
+@@ -444 +1358 @@ def get_all_memories(
 -def get_memory(memory_id: str, _auth=Depends(verify_auth)):
 +def get_memory(memory_id: str, _auth=Depends(require_admin)):
-@@ -447 +1357,2 @@ def get_memory(memory_id: str, _auth=Depends(verify_auth)):
+@@ -447 +1361,2 @@ def get_memory(memory_id: str, _auth=Depends(verify_auth)):
 -        return get_memory_instance().get(memory_id)
 +        with _memory_operation_lock(memory_id):
 +            return get_memory_instance().get(memory_id)
-@@ -453 +1364 @@ def get_memory(memory_id: str, _auth=Depends(verify_auth)):
+@@ -453 +1368 @@ def get_memory(memory_id: str, _auth=Depends(verify_auth)):
 -def search_memories(search_req: SearchRequest, _auth=Depends(verify_auth)):
 +def search_memories(search_req: SearchRequest, _auth=Depends(require_admin)):
-@@ -473,0 +1385,2 @@ def search_memories(search_req: SearchRequest, _auth=Depends(verify_auth)):
+@@ -473,0 +1389,2 @@ def search_memories(search_req: SearchRequest, _auth=Depends(verify_auth)):
 +        if search_req.rerank is not None:
 +            params["rerank"] = search_req.rerank
-@@ -478,3 +1391,7 @@ def search_memories(search_req: SearchRequest, _auth=Depends(verify_auth)):
+@@ -478,3 +1395,193 @@ def search_memories(search_req: SearchRequest, _auth=Depends(verify_auth)):
 -        return get_memory_instance().search(query=search_req.query, filters=filters, **params)
 -    except ValueError as e:
 -        raise HTTPException(status_code=400, detail=str(e))
@@ -9429,7 +9461,12 @@ index 20059fb8ed6075f7371f89215cb7990d8566a066..14fa78bbdaee9f18b068c2b1eeefa935
 +        )
 +    except (ValueError, Mem0ValidationError) as exc:
 +        raise _client_error(exc)
-@@ -486,0 +1404,325 @@ def search_memories(search_req: SearchRequest, _auth=Depends(verify_auth)):
++    except HTTPException:
++        raise
++    except Exception:
++        raise upstream_error()
++
++
 +@app.post("/internal/mcp/search", include_in_schema=False)
 +def internal_mcp_search(
 +    request: InternalMemorySearch,
@@ -9610,8 +9647,7 @@ index 20059fb8ed6075f7371f89215cb7990d8566a066..14fa78bbdaee9f18b068c2b1eeefa935
 +            key=lambda item: (item["type"], item.get("project_id") or "", item["id"]),
 +        )
 +        return {"results": results, "count": len(results), "partial": partial}
-+    except HTTPException:
-+        raise
+@@ -482,0 +1590,139 @@ def search_memories(search_req: SearchRequest, _auth=Depends(verify_auth)):
 +    except (ValueError, Mem0ValidationError) as exc:
 +        raise _client_error(exc)
 +    except Exception:
@@ -9751,53 +9787,56 @@ index 20059fb8ed6075f7371f89215cb7990d8566a066..14fa78bbdaee9f18b068c2b1eeefa935
 +        raise
 +    except (ValueError, Mem0ValidationError) as exc:
 +        raise _client_error(exc)
-+    except Exception:
-+        raise upstream_error()
-+
-+
-@@ -488 +1730 @@ def search_memories(search_req: SearchRequest, _auth=Depends(verify_auth)):
+@@ -488 +1734 @@ def search_memories(search_req: SearchRequest, _auth=Depends(verify_auth)):
 -def update_memory(memory_id: str, updated_memory: MemoryUpdate, _auth=Depends(verify_auth)):
 +def update_memory(memory_id: str, updated_memory: MemoryUpdate, _auth=Depends(require_admin)):
-@@ -499 +1741,4 @@ def update_memory(memory_id: str, updated_memory: MemoryUpdate, _auth=Depends(ve
+@@ -499 +1745,4 @@ def update_memory(memory_id: str, updated_memory: MemoryUpdate, _auth=Depends(ve
 -        return get_memory_instance().update(**params)
 +        with _memory_operation_lock(memory_id):
 +            return get_memory_instance().update(**params)
 +    except HTTPException:
 +        raise
-@@ -507 +1752 @@ def update_memory(memory_id: str, updated_memory: MemoryUpdate, _auth=Depends(ve
+@@ -507 +1756 @@ def update_memory(memory_id: str, updated_memory: MemoryUpdate, _auth=Depends(ve
 -def memory_history(memory_id: str, _auth=Depends(verify_auth)):
 +def memory_history(memory_id: str, _auth=Depends(require_admin)):
-@@ -510 +1755,4 @@ def memory_history(memory_id: str, _auth=Depends(verify_auth)):
+@@ -510 +1759,4 @@ def memory_history(memory_id: str, _auth=Depends(verify_auth)):
 -        return get_memory_instance().history(memory_id=memory_id)
 +        with _memory_operation_lock(memory_id):
 +            return get_memory_instance().history(memory_id=memory_id)
 +    except HTTPException:
 +        raise
-@@ -516 +1764 @@ def memory_history(memory_id: str, _auth=Depends(verify_auth)):
+@@ -516 +1768 @@ def memory_history(memory_id: str, _auth=Depends(verify_auth)):
 -def delete_memory(memory_id: str, _auth=Depends(verify_auth)):
 +def delete_memory(memory_id: str, _auth=Depends(require_admin)):
-@@ -519 +1767,2 @@ def delete_memory(memory_id: str, _auth=Depends(verify_auth)):
+@@ -519 +1771,2 @@ def delete_memory(memory_id: str, _auth=Depends(verify_auth)):
 -        get_memory_instance().delete(memory_id=memory_id)
 +        with _memory_operation_lock(memory_id):
 +            get_memory_instance().delete(memory_id=memory_id)
-@@ -520,0 +1770,2 @@ def delete_memory(memory_id: str, _auth=Depends(verify_auth)):
+@@ -520,0 +1774,2 @@ def delete_memory(memory_id: str, _auth=Depends(verify_auth)):
 +    except HTTPException:
 +        raise
 diff --git a/server/mcp_scope.py b/server/mcp_scope.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..abab99f29dd77f93a40a3438c75ba337b8bae596
+index 0000000000000000000000000000000000000000..0e210d2eb38c59cbdcb80912bc97182f3be67e78
 --- /dev/null
 +++ b/server/mcp_scope.py
-@@ -0,0 +1,12 @@
+@@ -0,0 +1,19 @@
 +import hashlib
++import re
 +
 +MCP_SCOPE_VERSION = "v1"
++MCP_IDENTITY_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
++
++
++def validate_mcp_identity(value: str, name: str) -> str:
++    value = value.strip()
++    if not MCP_IDENTITY_PATTERN.fullmatch(value):
++        raise ValueError(f"{name} 必须是有效且非空的内部身份")
++    return value
 +
 +
 +def derive_mcp_agent_id(owner: str, project_id: str | None) -> str:
-+    owner = owner.strip()
-+    if not owner:
-+        raise ValueError("MCP owner 不能为空")
++    owner = validate_mcp_identity(owner, "MCP owner")
 +    scope = f"project:{project_id}" if project_id else "global"
 +    digest = hashlib.sha256(f"{owner}\0{scope}".encode("utf-8")).hexdigest()[:32]
 +    return f"mcp-scope-{MCP_SCOPE_VERSION}-{digest}"
@@ -11351,10 +11390,10 @@ index 621b67d4e2964eb1e2b474b9515a57e6edfd4354..24596a7b51436847feeda2f61ad2fded
 +def list_entities(_auth=Depends(require_admin)):
 diff --git a/server/scripts/backfill_mcp_scope.py b/server/scripts/backfill_mcp_scope.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..9fece31c4cd8da3c3f508aa1637fa20ce6d481c9
+index 0000000000000000000000000000000000000000..f6f5b8d472ff5cd1969fbc216ce80b69d9577daf
 --- /dev/null
 +++ b/server/scripts/backfill_mcp_scope.py
-@@ -0,0 +1,203 @@
+@@ -0,0 +1,207 @@
 +import argparse
 +import json
 +import os
@@ -11371,7 +11410,7 @@ index 0000000000000000000000000000000000000000..9fece31c4cd8da3c3f508aa1637fa20c
 +
 +sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 +
-+from mcp_scope import derive_mcp_agent_id  # noqa: E402
++from mcp_scope import derive_mcp_agent_id, validate_mcp_identity  # noqa: E402
 +
 +TABLE_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,62}$")
 +PROJECT_ID_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
@@ -11513,11 +11552,15 @@ index 0000000000000000000000000000000000000000..9fece31c4cd8da3c3f508aa1637fa20c
 +    table = os.environ.get("POSTGRES_COLLECTION_NAME", "memories")
 +    if not TABLE_PATTERN.fullmatch(table):
 +        raise RuntimeError("POSTGRES_COLLECTION_NAME 格式无效")
-+    owner = os.environ.get("MEM0_INTERNAL_OWNER", "codex-primary-adapter").strip()
-+    user_id = os.environ.get("MEM0_INTERNAL_USER_ID", "codex-primary").strip()
++    owner = validate_mcp_identity(
++        os.environ.get("MEM0_INTERNAL_OWNER", ""), "MEM0_INTERNAL_OWNER"
++    )
++    user_id = validate_mcp_identity(
++        os.environ.get("MEM0_INTERNAL_USER_ID", ""), "MEM0_INTERNAL_USER_ID"
++    )
 +    batch_size = int(os.environ.get("MEM0_MCP_BACKFILL_BATCH_SIZE", "500"))
-+    if not owner or not user_id or not 1 <= batch_size <= 5000:
-+        raise RuntimeError("MCP 内部身份或回填批次大小未正确配置")
++    if not 1 <= batch_size <= 5000:
++        raise RuntimeError("MCP 回填批次大小未正确配置")
 +
 +    with _connection() as connection:
 +        with connection.cursor() as cursor:
@@ -11681,10 +11724,10 @@ index b7b882a3e2448a52ca4a6392296d2411cf91e815..f06619cc762984cb78d6c0c343a8f269
 +    logging.info("首条记忆已保存，可在控制台中查看和管理")
 diff --git a/server/test_main.py b/server/test_main.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..7917894949eb59a6f81c9686fbbc9a8023d3ec22
+index 0000000000000000000000000000000000000000..84c8a1fb1583ef238419e178e94ad13a1f151355
 --- /dev/null
 +++ b/server/test_main.py
-@@ -0,0 +1,1297 @@
+@@ -0,0 +1,1305 @@
 +import json
 +import logging
 +import os
@@ -11706,7 +11749,7 @@ index 0000000000000000000000000000000000000000..7917894949eb59a6f81c9686fbbc9a80
 +from auth import create_access_token, generate_api_key
 +from fastapi import HTTPException
 +from fastapi.testclient import TestClient
-+from mcp_scope import derive_mcp_agent_id
++from mcp_scope import derive_mcp_agent_id, validate_mcp_identity
 +from models import APIKey, MCPDeletionOperation, User
 +from routers import api_keys as api_keys_router
 +from routers import auth as auth_router
@@ -12094,6 +12137,14 @@ index 0000000000000000000000000000000000000000..7917894949eb59a6f81c9686fbbc9a80
 +        self.assertEqual(url.host, "database.internal")
 +        self.assertEqual(url.database, "mem0_app")
 +        self.assertIn("p%40ss%3Aword%2Fwith%25chars", url.render_as_string(hide_password=False))
++
++    def test_internal_identity_contract(self):
++        for value in ("", "contains spaces", "-invalid-prefix", "x" * 129):
++            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "有效且非空"):
++                validate_mcp_identity(value, "测试身份")
++        self.assertEqual(
++            validate_mcp_identity("valid.identity:1", "测试身份"), "valid.identity:1"
++        )
 +
 +    def test_backfill_is_idempotent_and_rejects_conflicts(self):
 +        expected = derive_mcp_agent_id("owner", "project-a")
@@ -12606,7 +12657,7 @@ index 0000000000000000000000000000000000000000..7917894949eb59a6f81c9686fbbc9a80
 +    def test_filter_compiler_preserves_nested_boolean_logic(self):
 +        compiled = main._vector_store_filter(
 +            {
-+                "user_id": "codex-primary",
++                "user_id": "unit-test-user",
 +                "AND": [
 +                    {"mcp_owner": "adapter"},
 +                    {"sequence": {"gte": 1}},
@@ -12620,7 +12671,7 @@ index 0000000000000000000000000000000000000000..7917894949eb59a6f81c9686fbbc9a80
 +        self.assertIn("$or", serialized)
 +        self.assertIn("$not", serialized)
 +        self.assertIn("sequence", serialized)
-+        self.assertEqual(compiled["user_id"], "codex-primary")
++        self.assertEqual(compiled["user_id"], "unit-test-user")
 +
 +    def test_missing_filter_fields_follow_sql_three_value_logic(self):
 +        missing = {"metadata": {}}

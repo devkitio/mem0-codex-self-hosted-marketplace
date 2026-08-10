@@ -70,11 +70,18 @@ def _csv_env(name: str, default: str) -> list[str]:
     return [item.strip() for item in os.environ.get(name, default).split(",") if item.strip()]
 
 
+def _identity_env(name: str) -> str:
+    value = os.environ.get(name, "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", value):
+        raise RuntimeError(f"{name} 必须是有效且非空的内部身份")
+    return value
+
+
 MEM0_BASE_URL = os.environ.get("MEM0_BASE_URL", "http://mem0:8000").rstrip("/")
 INTERNAL_SERVICE_KEY = _secret("MEM0_INTERNAL_SERVICE_KEY")
 CONFIRMATION_SECRET = _secret("MCP_CONFIRMATION_SECRET")
-DEFAULT_USER_ID = os.environ.get("MEM0_DEFAULT_USER_ID", "codex-primary")
-OWNER = os.environ.get("MCP_OWNER", "codex-primary-adapter")
+DEFAULT_USER_ID = _identity_env("MEM0_DEFAULT_USER_ID")
+OWNER = _identity_env("MCP_OWNER")
 TIMEOUT = max(5.0, min(float(os.environ.get("MEM0_TIMEOUT_SECONDS", "45")), 120.0))
 READ_TIMEOUT = max(5.0, min(float(os.environ.get("MCP_READ_TIMEOUT_SECONDS", "12")), 30.0))
 MAX_TEXT = _env_int("MCP_MAX_TEXT_LENGTH", 12000, 100, 50000)
@@ -208,9 +215,9 @@ mcp = FastMCP(
         enable_dns_rebinding_protection=True,
         allowed_hosts=_csv_env(
             "MCP_ALLOWED_HOSTS",
-            "mem0-api.jiang.in,127.0.0.1:*,localhost:*,mem0-mcp:*",
+            "127.0.0.1:*,localhost:*,mem0-mcp:*",
         ),
-        allowed_origins=_csv_env("MCP_ALLOWED_ORIGINS", "https://mem0-api.jiang.in"),
+        allowed_origins=_csv_env("MCP_ALLOWED_ORIGINS", ""),
     ),
 )
 

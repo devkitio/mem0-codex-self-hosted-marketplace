@@ -9,6 +9,10 @@ import httpx
 
 os.environ.setdefault("MEM0_INTERNAL_SERVICE_KEY", "test-internal-service-key-0123456789")
 os.environ.setdefault("MCP_CONFIRMATION_SECRET", "test-confirmation-secret-9876543210")
+os.environ.setdefault("MEM0_DEFAULT_USER_ID", "unit-test-user")
+os.environ.setdefault("MCP_OWNER", "unit-test-adapter")
+os.environ.setdefault("MCP_ALLOWED_HOSTS", "mem0-api.example.com,127.0.0.1:*,localhost:*,mem0-mcp:*")
+os.environ.setdefault("MCP_ALLOWED_ORIGINS", "https://mem0-api.example.com")
 
 import server
 
@@ -34,6 +38,14 @@ class AdapterValidationTests(unittest.TestCase):
         self.assertEqual(server._secret("MEM0_INTERNAL_SERVICE_KEY"), server.INTERNAL_SERVICE_KEY)
         with self.assertRaisesRegex(RuntimeError, "不同值"):
             server._validate_runtime_secrets("x" * 32, "x" * 32)
+
+    def test_internal_identity_must_be_explicit_and_valid(self):
+        for value in ("", "contains spaces", "-invalid-prefix", "x" * 129):
+            with self.subTest(value=value), patch.dict(os.environ, {"UNIT_TEST_ID": value}):
+                with self.assertRaisesRegex(RuntimeError, "有效且非空"):
+                    server._identity_env("UNIT_TEST_ID")
+        with patch.dict(os.environ, {"UNIT_TEST_ID": "valid.identity:1"}):
+            self.assertEqual(server._identity_env("UNIT_TEST_ID"), "valid.identity:1")
 
     def test_http_client_request_logs_are_disabled(self):
         self.assertGreaterEqual(logging.getLogger("httpx").getEffectiveLevel(), logging.WARNING)
@@ -327,7 +339,7 @@ class AdapterAsyncTests(unittest.IsolatedAsyncioTestCase):
         headers = {
             "Accept": "application/json, text/event-stream",
             "Content-Type": "application/json",
-            "Host": "mem0-api.jiang.in",
+            "Host": "mem0-api.example.com",
         }
         async with server.mcp.session_manager.run():
             async with httpx.AsyncClient(
