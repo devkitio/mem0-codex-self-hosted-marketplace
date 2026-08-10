@@ -1,14 +1,24 @@
 # Mem0 Codex 自托管应用市场
 
-这是一个可直接通过 Git 安装的 Codex 插件市场。它把自托管 Mem0 MCP、生命周期钩子和 16 个记忆技能打包为 `mem0@mem0-self-hosted`。
+这是一个可直接通过 Git 安装的 Codex 插件市场，也是自托管 Mem0 生产服务的可复现源码入口。仓库固定 Mem0 官方上游提交和生产补丁，收录 MCP Adapter 源码，并把自托管 MCP、生命周期钩子和 16 个记忆技能打包为 `mem0@mem0-self-hosted`。
 
-当前市场连接：
+默认发布配置：
 
 - MCP：`https://mem0-api.jiang.in/mcp`
 - 认证环境变量：`MEM0_SELF_HOSTED_API_KEY`
 - 插件版本：以 `plugins/mem0/.codex-plugin/plugin.json` 为准
 
 仓库不会保存任何 Mem0 令牌或用户记忆。
+
+## 选择使用方式
+
+| 目标 | 从哪里开始 | 说明 |
+| --- | --- | --- |
+| 连接当前维护者的实例 | [Codex 插件安装](#codex-插件安装) | 只有在你能够登录该实例并生成 MCP 用途 API Key 时才适用 |
+| 部署自己的完整实例 | [完整自托管部署](#完整自托管部署) | 物化固定 Mem0 源码，部署 API、Dashboard、MCP Adapter 和 PostgreSQL，再安装插件 |
+| 开发或审查代码 | [本地开发与验证](#本地开发与验证) | 验证插件、生产补丁、MCP 契约和跨平台行为 |
+
+`main` 分支中的插件默认连接维护者公开的 `mem0-api.jiang.in` MCP 入口。其他部署不能共用该实例的 Key；请先完成自己的服务端部署，再 Fork 本仓库并修改 `plugins/mem0/.mcp.json`。生产补丁只包含 `example.com` 示例地址和通用路径，身份、可信代理、网段与外部 Docker 网络必须由部署者显式配置。
 
 ## 当前能力
 
@@ -41,7 +51,264 @@
 
 因此，本仓库已经尽量补齐官方常用能力，但不会模拟官方云端的多租户账号、计费、托管实体目录或后台控制台。
 
-## 安装
+## 完整自托管部署
+
+### 架构
+
+```mermaid
+flowchart LR
+    Codex["Codex 插件"] -->|"HTTPS /mcp + MCP 用途 Key"| Proxy["OpenResty / 反向代理"]
+    Proxy --> Adapter["Mem0 MCP Adapter"]
+    Adapter -->|"内部服务 Secret"| API["Mem0 API"]
+    Dashboard["Mem0 Dashboard"] --> API
+    API --> PostgreSQL["PostgreSQL + pgvector"]
+    API --> Models["LLM 与 Embedding 服务"]
+```
+
+客户端 API Key 只用于 `/auth/introspect` 校验用途和吊销状态。通过校验后，MCP Adapter 使用仅挂载在服务器上的内部服务 Secret 调用 Mem0，客户端 Key 不会被转发到记忆或管理员接口。
+
+### 仓库边界
+
+| 仓库提供 | 必须在服务器另外准备 |
+| --- | --- |
+| 固定 Mem0 上游提交与经过校验的生产补丁 | 域名、DNS、TLS 证书和反向代理运行环境 |
+| Mem0 API、Dashboard 和 Compose 的可重建源码 | LLM、Embedding、PostgreSQL 和 JWT 等 Secret |
+| MCP Adapter 的完整源码、锁定依赖和 Dockerfile | `/data/mem0-runtime`、`/data/mem0Mcp` 及正确权限 |
+| Codex 插件、技能、钩子和 MCP 契约快照 | PostgreSQL 数据、历史数据库和加密备份 |
+
+Git 仓库用于重建代码，不用于恢复生产数据。要恢复已有记忆，必须同时保留 PostgreSQL 备份；要保持现有登录和内部服务关系，还必须安全保留对应 Secret。
+
+### 1. 准备主机
+
+参考生产拓扑要求：
+
+- Linux 主机，已安装 Git、Python 3.10 或更高版本、OpenSSL、Docker Engine 和 Docker Compose 插件。
+- 两个 HTTPS 入口：一个用于 Dashboard，一个用于 API 与精确路径 `/mcp`。
+- 能访问选定的 LLM 和 Embedding 服务。
+- 参考 Compose 要求连接已经存在的反向代理与模型网关外部 Docker 网络；名称必须由部署者显式配置。
+- 镜像支持 `linux/amd64` 与 `linux/arm64`；应在目标架构构建，或使用 Buildx 显式指定平台。
+
+不要在未确认用途时盲目创建与现有基础设施同名的 Docker 网络。先检查实际网络：
+
+```bash
+sudo docker network ls
+sudo docker network inspect reverse-proxy
+sudo docker network inspect model-gateway
+```
+
+上面的名称只是示例，在后续配置中通过 `REVERSE_PROXY_NETWORK_NAME` 和 `MODEL_GATEWAY_NETWORK_NAME` 填写实际名称。如果反向代理运行在宿主机，或模型服务直接通过公网访问，应先从物化后的 `server/docker-compose.yaml` 中移除不需要的外部网络并重新审查网络出口，而不是创建没有实际消费者的占位网络。
+
+### 2. 获取并验证源码
+
+```bash
+git clone https://github.com/devkitio/mem0-codex-self-hosted-marketplace.git
+cd mem0-codex-self-hosted-marketplace
+python3 scripts/validate_repo.py
+python3 scripts/materialize_mem0.py .mem0-source
+```
+
+物化脚本会读取 `services/mem0-server/upstream.json`，获取固定的 Mem0 官方提交，校验 `mem0-production.patch` 的 SHA-256 后应用补丁，并执行 `git diff --check`。目标目录必须尚不存在；重新物化时应使用新的空目录，不要在旧产物上重复应用补丁。
+
+物化后的关键内容：
+
+- `.mem0-source/server/prod.Dockerfile`：Mem0 API 生产镜像。
+- `.mem0-source/server/dashboard/Dockerfile`：Dashboard 镜像。
+- `.mem0-source/server/docker-compose.yaml`：API、MCP Adapter、Dashboard 与 PostgreSQL 编排。
+- `.mem0-source/openresty/`：当前参考部署的反向代理、限流和隐私日志配置。
+- `services/mem0-mcp/`：MCP Adapter 的唯一受版本控制源码。
+
+### 3. 准备运行目录
+
+服务器约定 MCP 构建上下文位于 `/data/mem0Mcp`，运行数据位于 `/data/mem0-runtime`：
+
+```bash
+sudo install -d -m 0750 /data/mem0Mcp /data/mem0-runtime
+sudo install -d -m 0700 -o 10001 -g 10001 /data/mem0Mcp/secrets /data/mem0-runtime/secrets
+sudo install -d -m 0700 -o 10001 -g 10001 /data/mem0-runtime/history
+
+sudo install -m 0644 services/mem0-mcp/.dockerignore /data/mem0Mcp/.dockerignore
+sudo install -m 0644 services/mem0-mcp/Dockerfile /data/mem0Mcp/Dockerfile
+sudo install -m 0644 services/mem0-mcp/requirements.in /data/mem0Mcp/requirements.in
+sudo install -m 0644 services/mem0-mcp/requirements.lock /data/mem0Mcp/requirements.lock
+sudo install -m 0644 services/mem0-mcp/server.py /data/mem0Mcp/server.py
+sudo install -m 0644 services/mem0-mcp/test_adapter.py /data/mem0Mcp/test_adapter.py
+```
+
+不要把整个服务器目录复制回 Git。`/data/mem0Mcp/secrets`、`__pycache__`、临时配置和运行日志都不属于源码。
+
+### 4. 生成 Secret 与运行配置
+
+以下四个 Secret 应分别随机生成，`mem0_internal_service_key` 与 `mcp_confirmation_secret` 不能相同：
+
+```bash
+sudo sh -c 'umask 077; openssl rand -hex 32 > /data/mem0-runtime/secrets/postgres_password'
+sudo sh -c 'umask 077; openssl rand -hex 32 > /data/mem0-runtime/secrets/mem0_jwt_secret'
+sudo sh -c 'umask 077; openssl rand -hex 32 > /data/mem0Mcp/secrets/mem0_internal_service_key'
+sudo sh -c 'umask 077; openssl rand -hex 32 > /data/mem0Mcp/secrets/mcp_confirmation_secret'
+sudo chown 10001:10001 /data/mem0-runtime/secrets/* /data/mem0Mcp/secrets/*
+sudo chmod 0400 /data/mem0-runtime/secrets/* /data/mem0Mcp/secrets/*
+```
+
+再分别创建以下单行文件，不要加引号，也不要把真实值写进 Git、终端历史、工单或截图：
+
+| 文件 | 内容 |
+| --- | --- |
+| `/data/mem0-runtime/secrets/llm_api_key` | LLM 服务 API Key |
+| `/data/mem0-runtime/secrets/llm_api_base` | OpenAI 兼容 LLM Base URL |
+| `/data/mem0-runtime/secrets/embedding_api_key` | Embedding 服务 API Key |
+| `/data/mem0-runtime/secrets/embedding_api_base` | OpenAI 兼容 Embedding Base URL |
+
+写入这四个模型配置文件后，同样将所有者设置为 `10001:10001`、权限设置为 `0400`。生产 Compose 会把 Secret 挂载到 `/run/secrets`，不会通过普通环境变量传递。UID `10001` 是 Mem0 API 与 MCP Adapter 镜像中的非 root 运行用户；如果自行修改 Dockerfile 用户，必须同步调整文件所有权。
+
+创建 `/data/mem0-runtime/runtime.env`，只保存非敏感的模型配置，并设置为 `root:root`、权限 `0600`：
+
+```dotenv
+LLM_MODEL=gpt-5.4-mini
+EMBEDDING_MODEL=qwen3.7-text-embedding
+EMBEDDING_DIMS=1024
+```
+
+以上模型名称是当前参考格式，必须替换为模型服务实际支持的名称。当前参考配置的 PostgreSQL collection 与 1024 维向量一致。开始写入生产数据后，不要直接修改 Embedding 模型、维度或 collection；这类变更需要单独的数据迁移和重新向量化方案。
+
+### 5. 配置 Compose
+
+参考物化后的 `.mem0-source/server/.env.example` 创建持久化的 `/data/mem0-runtime/compose.env`，并至少检查以下内容：
+
+```dotenv
+MEM0_IMAGE=mem0-local/mem0:20260810T120000Z-a81bc3e
+MEM0_MCP_IMAGE=mem0-local/mem0-mcp:20260810T120000Z-a81bc3e
+MEM0_DASHBOARD_IMAGE=mem0-local/mem0-dashboard:20260810T120000Z-a81bc3e
+
+MEM0_RUNTIME_ROOT=/data/mem0-runtime
+MEM0_MCP_ROOT=/data/mem0Mcp
+POSTGRES_COLLECTION_NAME=memories_1024
+
+MEM0_INTERNAL_USER_ID=mem0-user
+MEM0_INTERNAL_OWNER=mem0-mcp-adapter
+MEM0_PUBLIC_API_URL=https://mem0-api.example.com
+MEM0_DASHBOARD_URL=https://mem0.example.com
+MCP_ALLOWED_HOSTS=mem0-api.example.com,127.0.0.1:*,localhost:*,mem0-mcp:*
+MCP_ALLOWED_ORIGINS=https://mem0-api.example.com
+MEM0_FORWARDED_ALLOW_IPS=127.0.0.1
+
+MEM0_DATA_SUBNET=172.30.0.0/24
+MEM0_DATA_GATEWAY=172.30.0.1
+MEM0_DASHBOARD_SUBNET=172.30.1.0/24
+MEM0_DASHBOARD_GATEWAY=172.30.1.1
+MCP_NETWORK_SUBNET=172.30.2.0/24
+MCP_NETWORK_GATEWAY=172.30.2.1
+MCP_ENTRY_SUBNET=172.30.3.0/24
+MCP_ENTRY_GATEWAY=172.30.3.1
+
+REVERSE_PROXY_NETWORK_NAME=reverse-proxy
+MODEL_GATEWAY_NETWORK_NAME=model-gateway
+```
+
+上面的域名、身份、网段、网络名和发布标识只是格式示例，必须替换为实际值。`MEM0_INTERNAL_USER_ID` 和 `MEM0_INTERNAL_OWNER` 必须以字母或数字开头，只能包含字母、数字、点、下划线、冒号和连字符，最长 128 个字符；它们与 Embedding 模型、维度和 collection 在写入生产数据后都必须保持稳定。`MEM0_FORWARDED_ALLOW_IPS` 只能包含实际反向代理来源，不能为了方便设置为 `*`。发布标识应包含 Git 提交短 SHA 或 UTC 时间戳；不要使用 `latest`。将 `compose.env` 设置为 `root:root`、权限 `0600`，并在启动前完整检查 `.mem0-source/server/.env.example` 和生成后的 `docker-compose.yaml`。
+
+### 6. 构建镜像
+
+以下示例在目标主机的原生架构构建三个镜像：
+
+```bash
+RELEASE_ID="$(date -u +%Y%m%dT%H%M%SZ)-$(git rev-parse --short HEAD)"
+
+sudo docker build --tag "mem0-local/mem0:${RELEASE_ID}" \
+  --file .mem0-source/server/prod.Dockerfile .mem0-source
+
+sudo docker build --tag "mem0-local/mem0-mcp:${RELEASE_ID}" \
+  /data/mem0Mcp
+
+sudo docker build --tag "mem0-local/mem0-dashboard:${RELEASE_ID}" \
+  .mem0-source/server/dashboard
+```
+
+构建完成后，把 `compose.env` 中三个镜像的标签更新为命令输出对应的 `RELEASE_ID`。
+
+跨架构构建时使用 Buildx，并把平台替换为实际目标：
+
+```bash
+sudo docker buildx build --platform linux/arm64 --load \
+  --tag "mem0-local/mem0:${RELEASE_ID}" \
+  --file .mem0-source/server/prod.Dockerfile .mem0-source
+```
+
+MCP Adapter 与 Dashboard 使用相同方式指定平台。GitHub Actions 会分别验证三个 ARM64 镜像，常规 Linux 验证同时覆盖完整测试与锁定依赖安装。
+
+### 7. 检查并启动
+
+先渲染 Compose，确保没有缺失变量、错误网络或意外公开端口：
+
+```bash
+sudo docker compose \
+  --env-file /data/mem0-runtime/compose.env \
+  --file .mem0-source/server/docker-compose.yaml \
+  config
+```
+
+确认配置后启动。Mem0 容器会先执行 MCP 范围回填和 Alembic 数据库迁移，再启动 API：
+
+```bash
+sudo docker compose \
+  --env-file /data/mem0-runtime/compose.env \
+  --file .mem0-source/server/docker-compose.yaml \
+  up -d --no-build
+```
+
+参考 Compose 只把服务绑定到回环地址：Mem0 API `127.0.0.1:8888`、MCP Adapter `127.0.0.1:8890`、Dashboard `127.0.0.1:3111`、PostgreSQL `127.0.0.1:8432`。不要为了省略反向代理而把内部端口直接暴露到公网。
+
+### 8. 配置 HTTPS 反向代理
+
+`.mem0-source/openresty/` 是通用 OpenResty/Nginx 参考配置，包含：
+
+- API、Dashboard 与 MCP 的分流。
+- `/internal` 路由阻断。
+- MCP 流式响应所需的关闭缓冲配置。
+- 登录、API 与 MCP 限流。
+- Cloudflare 真实来源地址恢复和不记录正文的隐私日志格式。
+
+这些文件使用 `mem0-api.example.com`、`mem0.example.com`、`/etc/nginx/mem0` 和 `/etc/letsencrypt` 作为示例。复制到服务器前必须替换域名与路径并运行 `nginx -t`；使用 1Panel、Caddy、Traefik 或其他反向代理时，应等价保留 `/mcp` 精确路由、`Authorization` 与 MCP 协议头、关闭响应缓冲、HTTPS 以及 `/internal` 禁止外部访问。
+
+### 9. 验证服务
+
+```bash
+sudo docker compose \
+  --env-file /data/mem0-runtime/compose.env \
+  --file .mem0-source/server/docker-compose.yaml \
+  ps
+
+curl --fail http://127.0.0.1:8888/api/readyz
+curl --fail http://127.0.0.1:8890/readyz
+curl --fail http://127.0.0.1:3111/api/health
+curl --fail https://mem0-api.example.com/api/health
+```
+
+最后一个地址是示例，验证时必须替换为自己的 API 域名。
+
+还应确认：
+
+- 未携带 Bearer Token 请求公网 `/mcp` 时被拒绝。
+- 公网无法访问 `/internal` 与 `/internal/*`。
+- Dashboard 能完成管理员初始化并正常登录。
+- Dashboard 的 API Key 页面可以分别创建“管理员 REST API”和“Codex MCP（受限）”两种 Key。
+
+在 Dashboard 生成用途为“Codex MCP（受限）”的 Key 后，再继续安装客户端插件。不要把管理员 Key 配置给 Codex。
+
+### 10. 备份、升级与回滚
+
+至少备份以下内容：
+
+- PostgreSQL：记忆、用户、API Key 哈希、MCP 删除操作和业务状态。
+- `/data/mem0-runtime/history`：本地历史数据库。
+- `/data/mem0-runtime/runtime.env` 与 `compose.env`：运行配置和当前镜像标识。
+- `/data/mem0-runtime/secrets` 与 `/data/mem0Mcp/secrets`：使用独立加密介质备份，不得提交 Git。
+- 当前 Git 提交、物化清单和三个镜像发布标识。
+
+升级前先执行 PostgreSQL 一致性备份并记录当前镜像标识。拉取新提交后，在新的空目录重新物化和测试，构建新的不可变镜像；只有验证通过后才更新 `compose.env` 中的三个镜像标识并执行 `docker compose up -d --no-build`。回滚时恢复旧镜像标识；如果新版本已经执行不可逆数据库迁移，还必须按对应版本的数据库方案恢复备份，不能只回滚容器。
+
+仓库不包含生产数据和 Secret，因此只备份 Git 仓库不足以灾难恢复。
+
+## Codex 插件安装
 
 ### 1. 准备环境
 
@@ -202,7 +469,7 @@ python3 plugins/mem0/scripts/mem0_self_hosted.py --current-project --cwd "/你�
 
 两个批量工具在插件配置中默认禁用。需要使用时必须由用户明确启用，并遵循“预览 → 明确确认 → 5 分钟 HMAC 令牌执行”的流程；服务端持久化删除进度，同一令牌只恢复未完成操作或返回既有结果，不支持用户级或全局清空。
 
-## 更新
+## 插件更新
 
 ```bash
 codex plugin marketplace upgrade mem0-self-hosted
@@ -211,7 +478,7 @@ codex plugin add mem0@mem0-self-hosted
 
 更新后重启 Codex。钩子内容发生变化时，需要在 `/hooks` 中重新审核。
 
-## 卸载
+## 插件卸载
 
 ```bash
 codex plugin remove mem0@mem0-self-hosted
@@ -222,7 +489,7 @@ codex plugin marketplace remove mem0-self-hosted
 
 ## 使用其他自托管地址
 
-Fork 本仓库并修改 [`plugins/mem0/.mcp.json`](plugins/mem0/.mcp.json) 中的 `url`。生命周期脚本会读取同一个文件，因此不需要再修改钩子代码。远程地址必须使用 HTTPS，只有 `localhost`、`127.0.0.1` 和 `::1` 等回环地址允许 HTTP；认证只会跟随同源重定向。修改后应提升插件版本，避免 Codex 继续使用旧缓存。
+Fork 本仓库并修改 [`plugins/mem0/.mcp.json`](plugins/mem0/.mcp.json) 中的 `url`。生命周期脚本会读取同一个文件，因此不需要再修改钩子代码。远程地址必须使用 HTTPS，只有 `localhost`、`127.0.0.1` 和 `::1` 等回环地址允许 HTTP；认证只会跟随同源重定向。还要同步检查生产 Compose 中的 `MEM0_PUBLIC_API_URL`、`MEM0_DASHBOARD_URL`、`MCP_ALLOWED_HOSTS`、`MCP_ALLOWED_ORIGINS`，以及物化后 OpenResty 配置中的域名和路径。修改后应提升插件版本并更新仓库校验中的预期地址，避免 Codex 继续使用旧缓存或 CI 误报配置漂移。
 
 ## 本地开发与验证
 
