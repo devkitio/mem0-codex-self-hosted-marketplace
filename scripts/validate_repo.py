@@ -244,6 +244,9 @@ def main() -> None:
     assert '"/auth/me"' not in adapter_source, "Adapter 仍使用管理员身份接口校验 Key"
     assert '"/search"' not in adapter_source, "Adapter 仍调用公开搜索接口"
     assert "get_access_token" not in adapter_source, "Adapter 仍可能转发客户端 Key"
+    assert "_identity_env" in adapter_source, "Adapter 未强制显式配置内部身份"
+    for forbidden in ("mem0-api.jiang.in", "codex-primary", "codex-primary-adapter"):
+        assert forbidden not in adapter_source, f"Adapter 泄露生产默认值：{forbidden}"
     assert "services/mem0-mcp/requirements.lock" in workflow, "CI 未验证 MCP Adapter"
 
     upstream_manifest_path = MEM0_SERVER / "upstream.json"
@@ -323,6 +326,31 @@ def main() -> None:
     ):
         assert expected in patch_text, f"Mem0 生产补丁缺少 Secret 边界：{expected}"
     for expected in (
+        "MEM0_INTERNAL_USER_ID:?必须设置 MEM0_INTERNAL_USER_ID",
+        "MEM0_INTERNAL_OWNER:?必须设置 MEM0_INTERNAL_OWNER",
+        "MEM0_FORWARDED_ALLOW_IPS:?必须设置 MEM0_FORWARDED_ALLOW_IPS",
+        "REVERSE_PROXY_NETWORK_NAME:?必须设置 REVERSE_PROXY_NETWORK_NAME",
+        "MODEL_GATEWAY_NETWORK_NAME:?必须设置 MODEL_GATEWAY_NETWORK_NAME",
+        "mem0-api.example.com",
+        "/etc/nginx/mem0",
+        "validate_mcp_identity",
+    ):
+        assert expected in patch_text, f"Mem0 生产补丁缺少通用部署参数：{expected}"
+    for forbidden in (
+        "mem0-api.jiang.in",
+        "mem0.jiang.in",
+        "codex-primary",
+        "1Panel-openresty",
+        "sub2api-deploy",
+        "/www/sites/",
+        "/opt/1panel/",
+        "192.168.144.",
+        "192.168.64.",
+        "192.168.112.",
+        "192.168.128.",
+    ):
+        assert forbidden not in patch_text, f"Mem0 生产补丁泄露部署指纹：{forbidden}"
+    for expected in (
         "openresty/dashboard-proxy.conf",
         "proxy_pass http://127.0.0.1:3111",
         "COPY --from=builder --chown=nextjs:nodejs /app/public",
@@ -361,6 +389,10 @@ def main() -> None:
         "pnpm audit --prod --audit-level=high",
         'docker exec "$container" wget',
         "platforms: linux/arm64",
+        "fetch-depth: 0",
+        'GITLEAKS_VERSION: "8.30.1"',
+        "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb",
+        "git --redact --verbose --exit-code 1",
     ):
         assert expected in workflow, f"CI 缺少 Mem0 生产门禁：{expected}"
     for action_sha in (

@@ -8,6 +8,32 @@ permissions:
   contents: read
 
 jobs:
+  scan-secrets:
+    name: 扫描凭据泄露
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: 检出完整历史
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+      - name: 安装固定版本 Gitleaks
+        env:
+          GITLEAKS_VERSION: "8.30.1"
+          GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/gitleaks.tar.gz"
+          curl --fail --silent --show-error --location --retry 3 \
+            --output "$archive" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  ${archive}" | sha256sum --check --strict
+          tar --extract --gzip --file "$archive" --directory "$RUNNER_TEMP" gitleaks
+          "$RUNNER_TEMP/gitleaks" version
+      - name: 扫描完整 Git 历史
+        run: |
+          "$RUNNER_TEMP/gitleaks" git --redact --verbose --exit-code 1 .
+
   validate:
     name: 验证 (${{ matrix.os }})
     timeout-minutes: 15
@@ -82,6 +108,8 @@ jobs:
       EMBEDDING_API_BASE: https://example.invalid/v1
       JWT_SECRET: ci-only-placeholder-not-a-secret-32-bytes
       MEM0_INTERNAL_SERVICE_KEY: ci-only-placeholder-not-a-secret
+      MEM0_INTERNAL_USER_ID: ci-user
+      MEM0_INTERNAL_OWNER: ci-adapter
       MEM0_TELEMETRY: "false"
       HISTORY_DB_PATH: /tmp/mem0-ci-history.db
       MEM0_TEST_RESTART_STATE_PATH: /tmp/mem0-restart-state.json
