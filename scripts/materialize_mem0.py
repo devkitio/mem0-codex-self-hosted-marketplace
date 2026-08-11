@@ -17,6 +17,7 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parent.parent
 MANIFEST_PATH = ROOT / "services" / "mem0-server" / "upstream.json"
+EXPECTED_REPOSITORY = "https://github.com/mem0ai/mem0.git"
 GIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 LOCAL_GIT_TIMEOUT_SECONDS = 30
@@ -63,8 +64,7 @@ def _load_manifest() -> tuple[dict[str, Any], Path]:
     patch_sha256 = manifest.get("patch_sha256")
     if (
         not isinstance(repository, str)
-        or not repository.startswith("https://github.com/")
-        or not repository.endswith(".git")
+        or repository != EXPECTED_REPOSITORY
         or not isinstance(commit, str)
         or not GIT_SHA_RE.fullmatch(commit)
         or not isinstance(patch_name, str)
@@ -84,9 +84,10 @@ def _load_manifest() -> tuple[dict[str, Any], Path]:
 
 def materialize(target: Path) -> None:
     manifest, patch_path = _load_manifest()
-    target = target.resolve()
-    if target.exists():
+    target = Path(os.path.abspath(target))
+    if os.path.lexists(target):
         raise RuntimeError(f"目标目录已存在：{target}")
+    target = target.resolve()
     target.parent.mkdir(parents=True, exist_ok=True)
     temporary = Path(tempfile.mkdtemp(prefix=".mem0-materialize-", dir=target.parent))
     try:
@@ -125,6 +126,8 @@ def materialize(target: Path) -> None:
             temporary,
         )
         _run(["git", "diff", "--check"], temporary)
+        if os.path.lexists(target):
+            raise RuntimeError(f"目标目录已存在：{target}")
         temporary.replace(target)
     except Exception:
         shutil.rmtree(temporary, ignore_errors=True)

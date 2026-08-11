@@ -1,4 +1,6 @@
+import hashlib
 import importlib.util
+import json
 import subprocess
 import tempfile
 import unittest
@@ -15,6 +17,29 @@ SPEC.loader.exec_module(materializer)
 
 
 class MaterializeMem0Tests(unittest.TestCase):
+    def test_上游清单只接受固定官方仓库(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            patch_path = root / "source.patch"
+            patch_path.write_text("", encoding="utf-8")
+            manifest_path = root / "upstream.json"
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "repository": "https://github.com/example/mem0.git",
+                        "commit": "a" * 40,
+                        "patch": patch_path.name,
+                        "patch_sha256": hashlib.sha256(patch_path.read_bytes()).hexdigest(),
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with mock.patch.object(materializer, "MANIFEST_PATH", manifest_path):
+                with self.assertRaisesRegex(RuntimeError, "上游清单内容无效"):
+                    materializer._load_manifest()
+
     def test_命令超时转换为稳定错误(self):
         with tempfile.TemporaryDirectory() as directory, mock.patch.object(
             materializer.subprocess,
@@ -80,6 +105,55 @@ class MaterializeMem0Tests(unittest.TestCase):
                     materializer.materialize(target)
 
             self.assertFalse(target.exists())
+            self.assertEqual(list(root.glob(".mem0-materialize-*")), [])
+
+    def test_断开的目标符号链接也会被拒绝(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "output"
+            missing = root / "missing"
+            try:
+                target.symlink_to(missing, target_is_directory=True)
+            except OSError as exc:
+                self.skipTest(f"当前环境无法创建符号链接：{type(exc).__name__}")
+
+            with self.assertRaisesRegex(RuntimeError, "目标目录已存在"):
+                materializer.materialize(target)
+
+            self.assertTrue(target.is_symlink())
+            self.assertFalse(missing.exists())
+
+    def test_发布前目标被创建时不会覆盖(self):
+        commit = "c" * 40
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            patch_path = root / "source.patch"
+            patch_path.write_text("", encoding="utf-8")
+            target = root / "output"
+
+            def fake_run(arguments, _cwd, **_kwargs):
+                if arguments[1:3] == ["rev-parse", "HEAD"]:
+                    return commit
+                if arguments[1:3] == ["diff", "--check"]:
+                    target.mkdir()
+                    (target / "sentinel.txt").write_text("用户文件", encoding="utf-8")
+                return ""
+
+            with mock.patch.object(
+                materializer,
+                "_load_manifest",
+                return_value=(
+                    {
+                        "repository": materializer.EXPECTED_REPOSITORY,
+                        "commit": commit,
+                    },
+                    patch_path,
+                ),
+            ), mock.patch.object(materializer, "_run", side_effect=fake_run):
+                with self.assertRaisesRegex(RuntimeError, "目标目录已存在"):
+                    materializer.materialize(target)
+
+            self.assertEqual((target / "sentinel.txt").read_text(encoding="utf-8"), "用户文件")
             self.assertEqual(list(root.glob(".mem0-materialize-*")), [])
 
 
