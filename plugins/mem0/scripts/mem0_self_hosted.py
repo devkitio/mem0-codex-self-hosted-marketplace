@@ -802,9 +802,10 @@ def project_scope_notice(cwd: str | None) -> str:
     mapped = _mapped_project_id(root, load_json_file(project_mapping_path(), {}))
     if mapped is not None:
         return ""
+    repository_fingerprint = _repository_remote_fingerprint(root)
     synchronized = _server_project_id(
         load_json_file(server_project_scopes_path(), {}),
-        _repository_remote_fingerprint(root),
+        repository_fingerprint,
         _current_credential_fingerprint(),
     )
     if synchronized is not None:
@@ -816,11 +817,19 @@ def project_scope_notice(cwd: str | None) -> str:
         return ""
     project_id = str(record.get("project_id", ""))
     legacy_id = str(record.get("legacy_project_id", ""))
-    return (
+    collision_notice = (
         f"检测到同名但身份不同的 Git 仓库；当前工作区已隔离为 project_id `{project_id}`。"
         f"旧范围 `{legacy_id}` 中可能存在此前混合的记忆，插件不会自动迁移或删除；"
-        "跨机器共享请使用 `mem0:switch-project` 确认迁移到服务端私有范围。"
     )
+    if repository_fingerprint is None:
+        return collision_notice + "当前没有可识别的 Git 远端，将继续使用本机隔离范围。"
+    if _ensure_project_sync_mode(root, repository_fingerprint) != "legacy":
+        return (
+            collision_notice
+            + "当前无需手动迁移；自动同步启用且连接可用时，"
+            "后续启动会获取服务端私有范围。"
+        )
+    return collision_notice + "跨机器共享请使用 `mem0:switch-project` 确认迁移到服务端私有范围。"
 
 
 def set_project_mapping(cwd: str | None, project_id: str | None) -> str:

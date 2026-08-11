@@ -1770,7 +1770,7 @@ class Mem0SelfHostedTests(unittest.TestCase):
             finally:
                 mem0._cached_git_root.cache_clear()
 
-    def test_同名仓库按远端身份隔离且显式映射可消除提示(self):
+    def test_同名仓库按远端身份隔离且只有旧范围提示迁移(self):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
             data = base / "plugin-data"
@@ -1800,16 +1800,51 @@ class Mem0SelfHostedTests(unittest.TestCase):
                     self.assertNotEqual(second_id, first_id)
                     self.assertRegex(second_id, r"^shared-name-[0-9a-f]{12}$")
                     self.assertEqual(clone_id, first_id)
-                    notice = mem0.project_scope_notice(str(second))
-                    self.assertIn(second_id, notice)
-                    self.assertIn(first_id, notice)
-                    self.assertIn("不会自动迁移", notice)
+                    automatic_notice = mem0.project_scope_notice(str(second))
+                    self.assertFalse(mem0.project_scope_status(str(second))["migration_required"])
+                    self.assertIn(second_id, automatic_notice)
+                    self.assertIn(first_id, automatic_notice)
+                    self.assertIn("无需手动迁移", automatic_notice)
+                    self.assertNotIn("switch-project", automatic_notice)
+
+                    repository_fingerprint = mem0._repository_remote_fingerprint(second)
+                    self.assertIsNotNone(repository_fingerprint)
+                    mem0._set_project_sync_mode(repository_fingerprint, "legacy")
+                    migration_notice = mem0.project_scope_notice(str(second))
+                    self.assertTrue(mem0.project_scope_status(str(second))["migration_required"])
+                    self.assertIn("switch-project", migration_notice)
 
                     self.assertEqual(
                         mem0.set_project_mapping(str(second), "shared-team-project"),
                         "shared-team-project",
                     )
                     self.assertEqual(mem0.project_scope_notice(str(second)), "")
+            finally:
+                mem0._cached_git_root.cache_clear()
+
+    def test_同名无远端仓库不提示无法执行的同步(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            data = base / "plugin-data"
+            first = base / "first" / "shared-name"
+            second = base / "second" / "shared-name"
+            for root in (first, second):
+                (root / ".git").mkdir(parents=True)
+                (root / ".git" / "HEAD").write_text(
+                    "ref: refs/heads/main\n",
+                    encoding="utf-8",
+                )
+            mem0._cached_git_root.cache_clear()
+            try:
+                with mock.patch.object(mem0, "PLUGIN_DATA", data):
+                    self.assertEqual(mem0.resolve_project_id(str(first)), "shared-name")
+                    second_id = mem0.resolve_project_id(str(second))
+                    notice = mem0.project_scope_notice(str(second))
+
+                    self.assertNotEqual(second_id, "shared-name")
+                    self.assertIn("没有可识别的 Git 远端", notice)
+                    self.assertNotIn("switch-project", notice)
+                    self.assertFalse(mem0.project_scope_status(str(second))["sync_available"])
             finally:
                 mem0._cached_git_root.cache_clear()
 
