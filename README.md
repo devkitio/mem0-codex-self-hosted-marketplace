@@ -30,7 +30,9 @@
 | 技能 | 16 个自托管技能，覆盖初始化、健康检查、记住、查看、置顶、遗忘、整理、导入导出、项目切换和统计 |
 | 项目策略 | 原生解析 `mem0.md` 的 `Settings/Search/Ignore/Identity/Categories/Retention` 六个区段 |
 | 自动记忆 | 新仓库跨机器范围自动解析、智能多查询检索、真实 rerank、质量门禁、90 天默认保留、分类保留、压缩后摘要和跨事件去重 |
-| 安全 | MCP 专用 Key、固定用户与所有者、强制项目边界、敏感信息脱敏、项目内相对路径、批量删除默认关闭 |
+| Dashboard 与治理 | 检索工作台、历史恢复、质量审查、批量维护、活动记录、Memory Decay 和 Dream 记忆整理 |
+| 平台运维 | 后台任务、定时与手动备份、预览恢复、JSON/CSV 导入、检索评测、冲突与敏感信息扫描、用户和项目权限 |
+| 安全 | 管理员 REST Key 与 MCP Key 用途隔离，`admin`/`editor`/`viewer` 角色控制，强制项目边界，治理写操作预览确认，批量删除默认关闭 |
 
 旧版 6 个 MCP 工具保持参数兼容；当前插件和未升级的旧客户端仍可继续使用基础读写能力。
 
@@ -49,7 +51,25 @@
 | 批量删除 | 按官方服务策略执行 | 默认禁用，只允许项目或运行范围的“预览 → 确认令牌 → 执行” |
 | 生命周期 | 官方脚本请求云端 API | 本地钩子直接调用同一自托管 MCP，并增加契约漂移检查 |
 
-因此，本仓库已经尽量补齐官方常用能力，但不会模拟官方云端的多租户账号、计费、托管实体目录或后台控制台。
+因此，本仓库已经尽量补齐官方常用能力，但不会模拟官方云端的多租户账号、计费或托管实体目录。自托管 Dashboard 提供的是单实例记忆治理和平台运维能力，不等同于官方云端控制台。
+
+## Dashboard 与记忆治理
+
+Dashboard 在基础记忆管理之外提供以下已实现能力：
+
+| 模块 | 能力与安全边界 |
+| --- | --- |
+| 检索工作台 | 使用自然语言执行混合或向量检索，按项目、User、Agent、Run、时间、类型、分类和 metadata 筛选；可显示相似度、混合检索分数、重排位置和 Memory Decay 调整结果 |
+| 历史与质量 | 查看记忆历史并恢复指定版本；对记忆标记“正确”“无用”“严重错误”及原因，集中查看待审查内容 |
+| 批量维护 | 最多选择 500 条记忆，预览正文替换、metadata、过期时间和项目范围变更；执行前校验预览哈希和每条记忆版本，预览后发生变化会拒绝执行 |
+| 活动与排序 | 按操作、记忆、成功状态和来源查看活动记录；Memory Decay 根据更新时间、最近访问时间和访问频率对召回分数软降权 |
+| Dream 整理 | 按项目扫描重复、冲突和画像记忆，可选使用 LLM 生成提案；支持周期扫描，合并前必须预览，并再次校验哈希与记忆版本 |
+| 平台运维 | 查看和取消待执行后台任务，创建与恢复备份，预览 JSON/CSV 导入，维护检索评测用例并比较 hybrid、vector、keyword 的命中率和 MRR |
+| 安全与权限 | 扫描邮箱、手机号、身份证号和银行卡号，按配置警告、脱敏或阻断；管理员维护账户和项目成员关系，普通账户只能访问已分配项目，写入还必须具备项目 `editor` 权限 |
+
+检索工作台允许 `viewer`、`editor` 和 `admin` 使用，但会自动收窄到当前账户获准访问的项目。冲突检测和敏感信息扫描要求 `editor` 或 `admin`；质量审查、历史恢复、批量维护、Dream、备份恢复、导入、评测、账户和项目权限管理仅允许 `admin`。管理员 REST API Key 不能用于 MCP，MCP 用途 Key 也不能调用这些管理接口。
+
+批量维护和 Dream 都采用“预览 → 哈希确认 → 版本校验 → 执行”，恢复与导入采用“预览 → 哈希确认 → 后台执行”。替换恢复会先创建安全备份，通过 PostgreSQL 临时表完成原子切换；生成向量或写入 staging 失败时不会清空现有集合，切换失败会自动尝试从安全备份回滚。
 
 ## 完整自托管部署
 
@@ -125,6 +145,7 @@ python3 scripts/materialize_mem0.py .mem0-source
 sudo install -d -m 0750 /data/mem0Mcp /data/mem0-runtime
 sudo install -d -m 0700 -o 10001 -g 10001 /data/mem0Mcp/secrets /data/mem0-runtime/secrets
 sudo install -d -m 0700 -o 10001 -g 10001 /data/mem0-runtime/history
+sudo install -d -m 0700 -o 10001 -g 10001 /data/mem0-runtime/backups
 
 sudo install -m 0644 services/mem0-mcp/.dockerignore /data/mem0Mcp/.dockerignore
 sudo install -m 0644 services/mem0-mcp/Dockerfile /data/mem0Mcp/Dockerfile
@@ -134,7 +155,7 @@ sudo install -m 0644 services/mem0-mcp/server.py /data/mem0Mcp/server.py
 sudo install -m 0644 services/mem0-mcp/test_adapter.py /data/mem0Mcp/test_adapter.py
 ```
 
-不要把整个服务器目录复制回 Git。`/data/mem0Mcp/secrets`、`__pycache__`、临时配置和运行日志都不属于源码。
+不要把整个服务器目录复制回 Git。`/data/mem0Mcp/secrets`、`/data/mem0-runtime/backups`、`__pycache__`、临时配置和运行日志都不属于源码。
 
 ### 4. 生成 Secret 与运行配置
 
@@ -294,6 +315,8 @@ curl --fail https://mem0-api.example.com/api/health
 - 公网无法访问 `/internal` 与 `/internal/*`。
 - Dashboard 能完成管理员初始化并正常登录。
 - Dashboard 的 API Key 页面可以分别创建“管理员 REST API”和“Codex MCP（受限）”两种 Key。
+- 管理员可以打开检索、治理和平台页面，完成一次混合检索、手动备份和恢复预览。
+- `viewer` 只能读取已分配项目，`editor` 只能修改具有项目编辑权限的记忆，未分配项目和无项目归属记忆不会暴露给普通账户。
 
 在 Dashboard 生成用途为“Codex MCP（受限）”的 Key 后，再继续安装客户端插件。不要把管理员 Key 配置给 Codex。
 
@@ -301,13 +324,18 @@ curl --fail https://mem0-api.example.com/api/health
 
 至少备份以下内容：
 
-- PostgreSQL：记忆、用户、API Key 哈希、MCP 删除操作和业务状态。
+- PostgreSQL：记忆向量、用户、API Key 哈希、质量反馈、访问热度、活动记录、治理操作、后台任务、评测用例、项目权限、MCP 删除操作和业务状态。
 - `/data/mem0-runtime/history`：本地历史数据库。
+- `/data/mem0-runtime/backups`：Dashboard/API 生成的 Mem0 JSON 备份文件。
 - `/data/mem0-runtime/runtime.env` 与 `compose.env`：运行配置和当前镜像标识。
 - `/data/mem0-runtime/secrets` 与 `/data/mem0Mcp/secrets`：使用独立加密介质备份，不得提交 Git。
 - 当前 Git 提交、物化清单和三个镜像发布标识。
 
-升级前先执行 PostgreSQL 一致性备份并记录当前镜像标识。首次升级到包含 `resolve_project_scope` 的版本时，必须先按第 4 步创建并备份 `mcp_project_scope_secret`，否则新 Adapter 会拒绝启动。拉取新提交后，在新的空目录重新物化和测试，构建新的不可变镜像；只有验证通过后才更新 `compose.env` 中的三个镜像标识并执行 `docker compose up -d --no-build`。回滚时恢复旧镜像标识；如果新版本已经执行不可逆数据库迁移，还必须按对应版本的数据库方案恢复备份，不能只回滚容器。
+平台备份使用 `mem0-self-hosted-backup-v1` 格式，保存记忆、分类和治理设置，默认写入 `/data/mem0-runtime/backups`。单个备份最多包含 100000 条记忆，文件最大 512 MiB；超限时会明确失败，不会静默截断。`merge` 恢复会更新或新增记忆，`replace` 恢复会先生成安全备份并原子替换集合。两种模式都必须先生成恢复预览，并在执行时校验预览哈希。
+
+平台备份不包含用户、API Key、质量反馈、活动记录、后台任务、评测用例或项目权限，不能替代 PostgreSQL 一致性备份，也不能单独用于完整灾难恢复。备份文件和数据库归档都应复制到独立加密介质，并定期验证可恢复性。
+
+升级前先执行 PostgreSQL 一致性备份并记录当前镜像标识。最新治理数据迁移链为 `009 → 010 → 011`，当前 head 为 `011`；Compose 启动时会执行 `alembic upgrade head`。首次升级到包含 `resolve_project_scope` 的版本时，必须先按第 4 步创建并备份 `mcp_project_scope_secret`，否则新 Adapter 会拒绝启动。拉取新提交后，在新的空目录重新物化和测试，构建新的不可变镜像；只有验证通过后才更新 `compose.env` 中的三个镜像标识并执行 `docker compose up -d --no-build`。回滚时恢复旧镜像标识；如果新版本已经执行不可逆数据库迁移，还必须按对应版本的数据库方案恢复备份，不能只回滚容器。
 
 仓库不包含生产数据和 Secret，因此只备份 Git 仓库不足以灾难恢复。尤其不能丢失 `mcp_project_scope_secret`，否则无法继续为同一用户和仓库派生原有项目范围。
 
@@ -504,6 +532,7 @@ Fork 本仓库并修改 [`plugins/mem0/.mcp.json`](plugins/mem0/.mcp.json) 中�
 ```powershell
 python scripts/validate_repo.py
 python -m unittest discover -s tests -v
+python scripts/materialize_mem0.py .mem0-source
 codex plugin marketplace add "D:\code\mem0-codex-self-hosted-marketplace"
 codex plugin add mem0@mem0-self-hosted
 ```
@@ -511,8 +540,22 @@ codex plugin add mem0@mem0-self-hosted
 ```bash
 python3 scripts/validate_repo.py
 python3 -m unittest discover -s tests -v
+python3 scripts/materialize_mem0.py .mem0-source
 codex plugin marketplace add "/path/to/mem0-codex-self-hosted-marketplace"
 codex plugin add mem0@mem0-self-hosted
+```
+
+`.mem0-source` 必须尚不存在；需要重复验证时请换用新的空目录。物化后可验证 Dashboard：
+
+```bash
+cd .mem0-source/server/dashboard
+corepack enable
+corepack prepare pnpm@10.34.2 --activate
+pnpm install --frozen-lockfile
+pnpm run lint
+pnpm run typecheck
+pnpm run build
+pnpm audit --prod --audit-level=high
 ```
 
 真实连通性检查需要先设置 `MEM0_SELF_HOSTED_API_KEY`：
@@ -529,7 +572,7 @@ python3 plugins/mem0/scripts/mem0_self_hosted.py --check
 
 GitHub Actions 会在 Ubuntu、Windows 和 macOS 上分别执行仓库校验与完整单元测试。
 
-Linux 任务还会安装 `services/mem0-mcp/requirements.lock` 并运行 Adapter 的鉴权、内部接口和真实 ASGI Bearer 链路测试；生产 Adapter 的 Dockerfile 与锁定源码均位于 `services/mem0-mcp`。
+Linux 任务还会安装 `services/mem0-mcp/requirements.lock` 并运行 Adapter 的鉴权、内部接口和真实 ASGI Bearer 链路测试；生产 Adapter 的 Dockerfile 与锁定源码均位于 `services/mem0-mcp`。Mem0 服务任务使用隔离 PostgreSQL 验证 `006 → 011 → 006 → 011` 迁移往返、服务测试、PGVector 类型过滤、5001 条回填和跨进程恢复。Dashboard 任务使用 Node 22 与 pnpm 10.34.2 执行格式、类型、构建、生产依赖审计和运行镜像健康检查；三个生产镜像还会分别执行 ARM64 构建验证。
 
 当前实现还通过以下验收：
 
@@ -538,6 +581,8 @@ Linux 任务还会安装 `services/mem0-mcp/requirements.lock` 并运行 Adapter
 - 生产 `messages + infer=true`、metadata、到期日和 rerank 探针。
 - `update_memory` metadata 合并、置顶取消和单条清理探针。
 - 生产 11 工具契约与 `mcp-schema.snapshot.json` 一致性检查。
+- 治理检索、项目权限、后台任务取消、备份数量限制和 PostgreSQL 原子替换恢复测试。
+- Dashboard 格式、TypeScript 类型、生产构建、依赖审计和 `/api/health` 运行烟测。
 
 ## 许可证与来源
 
