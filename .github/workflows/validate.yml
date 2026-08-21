@@ -130,12 +130,12 @@ jobs:
         working-directory: .mem0-source/server
         run: |
           alembic upgrade 006
-          alembic upgrade 008
+          alembic upgrade 011
           alembic downgrade 006
-          alembic upgrade 008
+          alembic upgrade 011
       - name: 运行 Mem0 服务单元测试
         working-directory: .mem0-source/server
-        run: python -m unittest -v test_main.py
+        run: python -m unittest -v test_main.py test_self_hosted_features.py test_platform_operations.py
       - name: 验证 PGVector 类型过滤
         working-directory: .mem0-source/server
         env:
