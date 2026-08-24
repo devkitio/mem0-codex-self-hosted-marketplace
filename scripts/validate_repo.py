@@ -444,6 +444,7 @@ def main() -> None:
         "pnpm audit --prod --audit-level=high",
         "pip-audit==2.9.0",
         "Trivy 镜像门禁",
+        "DOCKER_CONFIG=/tmp/docker-config",
         "verify-attestation",
         "steps.publish.outputs.api_ref",
         'docker exec "$container" wget',

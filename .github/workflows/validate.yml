@@ -373,8 +373,8 @@ jobs:
             esac
             docker run --rm -v "$HOME/.docker:/root/.docker:ro" -v "$PWD:/workspace:ro" "$TRIVY_IMAGE" image --exit-code 1 --severity HIGH,CRITICAL --ignorefile /workspace/.trivyignore.yaml "$image"
             docker run --rm -v "$HOME/.docker:/root/.docker:ro" -v "$PWD:/workspace" "$SYFT_IMAGE" "$image" -o "spdx-json=/workspace/sbom-${component}.spdx.json"
-            docker run --rm -v "$HOME/.docker:/root/.docker:ro" -v "$PWD:/workspace:ro" -e ACTIONS_ID_TOKEN_REQUEST_TOKEN -e ACTIONS_ID_TOKEN_REQUEST_URL "$COSIGN_IMAGE" attest --yes --type spdxjson --predicate "/workspace/sbom-${component}.spdx.json" "$image"
-            docker run --rm -v "$HOME/.docker:/root/.docker:ro" -e ACTIONS_ID_TOKEN_REQUEST_TOKEN -e ACTIONS_ID_TOKEN_REQUEST_URL "$COSIGN_IMAGE" sign --yes "$image"
-            docker run --rm -v "$HOME/.docker:/root/.docker:ro" "$COSIGN_IMAGE" verify --certificate-identity "$identity" --certificate-oidc-issuer https://token.actions.githubusercontent.com "$image"
-            docker run --rm -v "$HOME/.docker:/root/.docker:ro" "$COSIGN_IMAGE" verify-attestation --type spdxjson --certificate-identity "$identity" --certificate-oidc-issuer https://token.actions.githubusercontent.com "$image"
+            docker run --rm -v "$HOME/.docker/config.json:/tmp/docker-config/config.json:ro" -v "$PWD:/workspace:ro" -e DOCKER_CONFIG=/tmp/docker-config -e ACTIONS_ID_TOKEN_REQUEST_TOKEN -e ACTIONS_ID_TOKEN_REQUEST_URL "$COSIGN_IMAGE" attest --yes --type spdxjson --predicate "/workspace/sbom-${component}.spdx.json" "$image"
+            docker run --rm -v "$HOME/.docker/config.json:/tmp/docker-config/config.json:ro" -e DOCKER_CONFIG=/tmp/docker-config -e ACTIONS_ID_TOKEN_REQUEST_TOKEN -e ACTIONS_ID_TOKEN_REQUEST_URL "$COSIGN_IMAGE" sign --yes "$image"
+            docker run --rm -v "$HOME/.docker/config.json:/tmp/docker-config/config.json:ro" -e DOCKER_CONFIG=/tmp/docker-config "$COSIGN_IMAGE" verify --certificate-identity "$identity" --certificate-oidc-issuer https://token.actions.githubusercontent.com "$image"
+            docker run --rm -v "$HOME/.docker/config.json:/tmp/docker-config/config.json:ro" -e DOCKER_CONFIG=/tmp/docker-config "$COSIGN_IMAGE" verify-attestation --type spdxjson --certificate-identity "$identity" --certificate-oidc-issuer https://token.actions.githubusercontent.com "$image"
           done
