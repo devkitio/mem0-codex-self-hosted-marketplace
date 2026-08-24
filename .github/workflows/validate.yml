@@ -113,6 +113,7 @@ jobs:
       MEM0_TELEMETRY: "false"
       HISTORY_DB_PATH: /tmp/mem0-ci-history.db
       MEM0_TEST_RESTART_STATE_PATH: /tmp/mem0-restart-state.json
+      PYTHONPATH: ${{ github.workspace }}/.mem0-source
     steps:
       - name: 检出仓库
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7

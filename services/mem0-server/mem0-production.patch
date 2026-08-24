@@ -20942,10 +20942,10 @@ index 0000000000000000000000000000000000000000..c176be094a36371d6b86d485b9968d05
 +    _JOB_EXECUTOR.submit(_execute_evaluation_v2, run_id)
 diff --git a/server/prod.Dockerfile b/server/prod.Dockerfile
 new file mode 100644
-index 0000000000000000000000000000000000000000..aa0a4b1582ce1453f61eeb8422a50773d03bb357
+index 0000000000000000000000000000000000000000..e1e8489782fb057b629aabc334e8c19c63357c08
 --- /dev/null
 +++ b/server/prod.Dockerfile
-@@ -0,0 +1,21 @@
+@@ -0,0 +1,22 @@
 +FROM python:3.12-slim@sha256:646fb0bca3dd3ea1bcc6feb72c17ed16eed6e10cffc732fcc1478bd3e7f02d7b
 +
 +ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -20957,6 +20957,7 @@ index 0000000000000000000000000000000000000000..aa0a4b1582ce1453f61eeb8422a50773
 +
 +COPY server/requirements.lock ./requirements.lock
 +RUN pip install --no-cache-dir --require-hashes --requirement requirements.lock && pip check && alembic --version
++COPY mem0/configs/vector_stores/pgvector.py /usr/local/lib/python3.12/site-packages/mem0/configs/vector_stores/pgvector.py
 +COPY mem0/vector_stores/pgvector.py /usr/local/lib/python3.12/site-packages/mem0/vector_stores/pgvector.py
 +COPY mem0/memory/main.py /usr/local/lib/python3.12/site-packages/mem0/memory/main.py
 +COPY mem0/memory/storage.py /usr/local/lib/python3.12/site-packages/mem0/memory/storage.py
@@ -27921,10 +27922,10 @@ index 0000000000000000000000000000000000000000..72ceda074283868cf74a41ff914b14a5
 +        unittest.main()
 diff --git a/server/test_platform_operations.py b/server/test_platform_operations.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..9e008b8793fea162a985e53ca705dc135d133db3
+index 0000000000000000000000000000000000000000..ae8fffbdb2e601f5f5c57b69ae081f765c3dc7c5
 --- /dev/null
 +++ b/server/test_platform_operations.py
-@@ -0,0 +1,790 @@
+@@ -0,0 +1,795 @@
 +import importlib.util
 +import json
 +import os
@@ -28328,6 +28329,11 @@ index 0000000000000000000000000000000000000000..9e008b8793fea162a985e53ca705dc13
 +        vector_config = server_config.config["vector_store"]["config"]
 +        self.assertTrue(vector_config["fts_phrase_search"])
 +        self.assertEqual(vector_config["fts_field_weights"], {"data": "A", "categories": "C"})
++        from mem0.configs.vector_stores.pgvector import PGVectorConfig
++
++        parsed = PGVectorConfig(**vector_config)
++        self.assertEqual(parsed.fts_language, "simple")
++        self.assertTrue(parsed.fts_phrase_search)
 +
 +    def test_dream_扫描只处理活跃或旧版记忆(self):
 +        rows = [
