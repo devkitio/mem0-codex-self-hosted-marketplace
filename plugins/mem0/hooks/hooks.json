@@ -15,7 +15,7 @@
         ]
       },
       {
-        "matcher": "mcp__mem0__(add_memory|search_memories|get_memories|get_memory|update_memory|delete_memory|get_memory_history|list_entities|resolve_project_scope|delete_all_memories|delete_entities)|mcp__plugin_mem0_mem0__(add_memory|search_memories|get_memories|get_memory|update_memory|delete_memory|get_memory_history|list_entities|resolve_project_scope|delete_all_memories|delete_entities)",
+        "matcher": "mcp__mem0__(add_memory|search_memories|get_memories|get_memory|update_memory|delete_memory|get_memory_history|list_entities|resolve_project_scope|delete_all_memories|delete_entities|list_memory_candidates|review_memory_candidate|submit_memory_feedback)|mcp__plugin_mem0_mem0__(add_memory|search_memories|get_memories|get_memory|update_memory|delete_memory|get_memory_history|list_entities|resolve_project_scope|delete_all_memories|delete_entities|list_memory_candidates|review_memory_candidate|submit_memory_feedback)",
         "hooks": [
           {
             "type": "command",

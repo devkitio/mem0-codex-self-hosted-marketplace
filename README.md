@@ -24,14 +24,14 @@
 
 | 层级 | 已提供能力 |
 | --- | --- |
-| MCP | 11 个工具，覆盖私有项目范围解析、新增、搜索、分页读取、详情、更新、单条删除、历史、实体枚举和两阶段批量管理 |
+| MCP | 14 个工具，覆盖私有项目范围解析、风险分级写入、搜索、分页读取、详情、更新、单条删除、历史、实体枚举、候选审核、版本化反馈和两阶段批量管理 |
 | 生命周期钩子 | `PreToolUse`、`SessionStart`、`UserPromptSubmit`、`PostToolUse`、`Stop`、`PreCompact` 六类事件 |
 | 系统兼容性 | Windows 使用 `python` 与 `commandWindows`，Linux/macOS 使用 `python3`；CI 在三种系统分别验证 |
 | 技能 | 16 个自托管技能，覆盖初始化、健康检查、记住、查看、置顶、遗忘、整理、导入导出、项目切换和统计 |
 | 项目策略 | 原生解析 `mem0.md` 的 `Settings/Search/Ignore/Identity/Categories/Retention` 六个区段 |
-| 自动记忆 | 新仓库跨机器范围自动解析、智能多查询检索、真实 rerank、质量门禁、90 天默认保留、分类保留、压缩后摘要和跨事件去重 |
-| Dashboard 与治理 | 检索工作台、历史恢复、质量审查、批量维护、活动记录、Memory Decay 和 Dream 记忆整理 |
-| 平台运维 | 后台任务、定时与手动备份、预览恢复、JSON/CSV 导入、检索评测、冲突与敏感信息扫描、用户和项目权限 |
+| 自动记忆 | 新仓库跨机器范围自动解析、证据与置信度分级、候选隔离、跨会话去重与冲突检测、智能多查询检索、真实 rerank、分类保留和压缩前后摘要 |
+| Dashboard 与治理 | 候选审核、检索解释、历史恢复、版本化质量审查、批量维护、有效使用事件、Memory Decay、画像投影和可完整回滚/重试的 Dream 整理 |
+| 平台运维 | 后台任务、定时与手动备份、预览恢复、JSON/CSV 导入、评测 v2 与发布门禁对比、冲突与敏感信息扫描、用户和项目权限 |
 | 安全 | 管理员 REST Key 与 MCP Key 用途隔离，`admin`/`editor`/`viewer` 角色控制，强制项目边界，治理写操作预览确认，批量删除默认关闭 |
 
 旧版 6 个 MCP 工具保持参数兼容；当前插件和未升级的旧客户端仍可继续使用基础读写能力。
@@ -44,7 +44,7 @@
 | --- | --- | --- |
 | 服务地址 | Mem0 官方 API/MCP | 固定为仓库配置的自托管 MCP |
 | 认证 | `MEM0_API_KEY` 等云端凭据 | 只使用自部署控制台生成且用途为 MCP 的 `MEM0_SELF_HOSTED_API_KEY` |
-| 工具数量 | 官方 9 个主要记忆工具 | 官方语义对应工具加历史读取和私有项目范围解析，共 11 个 |
+| 工具数量 | 官方 9 个主要记忆工具 | 官方语义对应工具加历史、私有项目范围、候选审核和反馈，共 14 个 |
 | 身份范围 | 云端账号、用户与应用语义 | 服务端固定用户和所有者，客户端只选择项目或运行范围 |
 | 实体目录 | 官方云端实体目录 | 从当前 Adapter 管理的记忆推导项目和运行实体 |
 | 搜索与列表 | 由官方云端控制 | 项目查询包含当前项目与全局记忆，精确读取和修改必须匹配项目 |
@@ -59,17 +59,19 @@ Dashboard 在基础记忆管理之外提供以下已实现能力：
 
 | 模块 | 能力与安全边界 |
 | --- | --- |
-| 检索工作台 | 使用自然语言执行混合或向量检索，按项目、User、Agent、Run、时间、类型、分类和 metadata 筛选；可显示相似度、混合检索分数、重排位置和 Memory Decay 调整结果 |
-| 历史与质量 | 查看记忆历史并恢复指定版本；对记忆标记“正确”“无用”“严重错误”及原因，集中查看待审查内容 |
+| 检索工作台 | 使用自然语言执行混合、向量或关键词检索，按项目、User、Agent、Run、时间、类型、分类和 metadata 筛选；显示 `retrieval_id`、两路排名、语义/RRF/rerank/反馈/Decay/最终分数和明确错误状态 |
+| 候选、历史与质量 | 审核自动提取的候选记忆，支持确认、拒绝或编辑后重评；查看完整版本快照并恢复旧版本；反馈绑定 `memory_id + payload_version + actor`，旧版本反馈不会污染新版本 |
 | 批量维护 | 最多选择 500 条记忆，预览正文替换、metadata、过期时间和项目范围变更；执行前校验预览哈希和每条记忆版本，预览后发生变化会拒绝执行 |
-| 活动与排序 | 按操作、记忆、成功状态和来源查看活动记录；Memory Decay 根据更新时间、最近访问时间和访问频率对召回分数软降权 |
-| Dream 整理 | 按项目扫描重复、冲突和画像记忆，可选使用 LLM 生成提案；支持周期扫描，合并前必须预览，并再次校验哈希与记忆版本 |
-| 平台运维 | 查看和取消待执行后台任务，创建与恢复备份，预览 JSON/CSV 导入，维护检索评测用例并比较 hybrid、vector、keyword 的命中率和 MRR |
+| 活动与排序 | 按操作、记忆、成功状态和来源查看活动记录；曝光与打开、采用、复制、反馈分开记录，只有有效使用会增加热度；反馈因子和有频率上限的 Decay 共同影响最终排序 |
+| Dream 与画像 | 按项目扫描重复、冲突和画像记忆，可选使用 LLM 生成提案；旧记忆只标记为 `superseded`，不物理删除；支持条件并存、待确认、完整回滚和部分失败后的恢复重试，受保护记忆禁止自动替代；画像、实体和别名投影均可重建且不改写原始事实 |
+| 平台运维 | 查看和取消待执行后台任务，创建与恢复最多 100000 条记忆的备份，预览 JSON/CSV 导入；评测 v2 支持数据集版本、多相关结果、分级相关性、Recall@K、Precision@K、MRR、NDCG、项目聚合、趋势和基线发布门禁 |
 | 安全与权限 | 扫描邮箱、手机号、身份证号和银行卡号，按配置警告、脱敏或阻断；管理员维护账户和项目成员关系，普通账户只能访问已分配项目，写入还必须具备项目 `editor` 权限 |
 
 检索工作台允许 `viewer`、`editor` 和 `admin` 使用，但会自动收窄到当前账户获准访问的项目。冲突检测和敏感信息扫描要求 `editor` 或 `admin`；质量审查、历史恢复、批量维护、Dream、备份恢复、导入、评测、账户和项目权限管理仅允许 `admin`。管理员 REST API Key 不能用于 MCP，MCP 用途 Key 也不能调用这些管理接口。
 
-批量维护和 Dream 都采用“预览 → 哈希确认 → 版本校验 → 执行”，恢复与导入采用“预览 → 哈希确认 → 后台执行”。替换恢复会先创建安全备份，通过 PostgreSQL 临时表完成原子切换；生成向量或写入 staging 失败时不会清空现有集合，切换失败会自动尝试从安全备份回滚。
+批量维护和 Dream 都采用“预览 → 哈希确认 → 版本校验 → 执行”，恢复与导入采用“预览 → 哈希确认 → 后台执行”。Dream 部分失败时会先恢复完整执行前快照，再生成新的哈希预览，必须重新确认后才能重试。替换恢复会先创建安全备份，通过 PostgreSQL 临时表完成原子切换；生成向量或写入 staging 失败时不会清空现有集合，切换失败会自动尝试从安全备份回滚。
+
+本次记忆质量闭环没有实现 Webhook，也不会向外部系统发送记忆正文、候选、反馈或治理事件。
 
 ## 完整自托管部署
 
@@ -190,9 +192,12 @@ sudo chmod 0400 /data/mem0-runtime/secrets/* /data/mem0Mcp/secrets/*
 LLM_MODEL=gpt-5.4-mini
 EMBEDDING_MODEL=qwen3.7-text-embedding
 EMBEDDING_DIMS=1024
+PGVECTOR_FTS_LANGUAGE=simple
+PGVECTOR_FTS_PHRASE_SEARCH=false
+PGVECTOR_FTS_FIELD_WEIGHTS={"text_lemmatized":"A","data":"B","categories":"C","memory_type":"D"}
 ```
 
-以上模型名称是当前参考格式，必须替换为模型服务实际支持的名称。当前参考配置的 PostgreSQL collection 与 1024 维向量一致。开始写入生产数据后，不要直接修改 Embedding 模型、维度或 collection；这类变更需要单独的数据迁移和重新向量化方案。
+以上模型名称是当前参考格式，必须替换为模型服务实际支持的名称。当前参考配置的 PostgreSQL collection 与 1024 维向量一致。`PGVECTOR_FTS_LANGUAGE` 使用 PostgreSQL 已安装的文本搜索配置，短语开关决定使用 `phraseto_tsquery` 还是 `plainto_tsquery`，字段权重只接受 `A`～`D`。开始写入生产数据后，不要直接修改 Embedding 模型、维度或 collection；这类变更需要单独的数据迁移和重新向量化方案。
 
 ### 5. 配置 Compose
 
@@ -270,7 +275,7 @@ sudo docker compose \
   config
 ```
 
-确认配置后启动。Mem0 容器会先执行 MCP 范围回填和 Alembic 数据库迁移，再启动 API：
+确认配置后启动。Mem0 容器严格按“`Alembic` 迁移 → MCP 范围回填 → 统一记忆目录和历史回填 → 未收敛 Mutation 幂等重试 → 数量、正文哈希、项目范围、历史、反馈、检索事件、投影引用和 Mutation 一致性检查 → API”顺序启动；任一环节失败都不会启动 API：
 
 ```bash
 sudo docker compose \
@@ -324,7 +329,7 @@ curl --fail https://mem0-api.example.com/api/health
 
 至少备份以下内容：
 
-- PostgreSQL：记忆向量、用户、API Key 哈希、质量反馈、访问热度、活动记录、治理操作、后台任务、评测用例、项目权限、MCP 删除操作和业务状态。
+- PostgreSQL：记忆目录、候选、关系、Mutation、检索会话与事件、版本化反馈、画像投影、评测 v2、用户、API Key 哈希、活动记录、治理操作、后台任务、项目权限、MCP 删除操作和业务状态。
 - `/data/mem0-runtime/history`：本地历史数据库。
 - `/data/mem0-runtime/backups`：Dashboard/API 生成的 Mem0 JSON 备份文件。
 - `/data/mem0-runtime/runtime.env` 与 `compose.env`：运行配置和当前镜像标识。
@@ -335,7 +340,7 @@ curl --fail https://mem0-api.example.com/api/health
 
 平台备份不包含用户、API Key、质量反馈、活动记录、后台任务、评测用例或项目权限，不能替代 PostgreSQL 一致性备份，也不能单独用于完整灾难恢复。备份文件和数据库归档都应复制到独立加密介质，并定期验证可恢复性。
 
-升级前先执行 PostgreSQL 一致性备份并记录当前镜像标识。最新治理数据迁移链为 `009 → 010 → 011`，当前 head 为 `011`；Compose 启动时会执行 `alembic upgrade head`。首次升级到包含 `resolve_project_scope` 的版本时，必须先按第 4 步创建并备份 `mcp_project_scope_secret`，否则新 Adapter 会拒绝启动。拉取新提交后，在新的空目录重新物化和测试，构建新的不可变镜像；只有验证通过后才更新 `compose.env` 中的三个镜像标识并执行 `docker compose up -d --no-build`。回滚时恢复旧镜像标识；如果新版本已经执行不可逆数据库迁移，还必须按对应版本的数据库方案恢复备份，不能只回滚容器。
+升级前进入维护模式、停止全部写入，执行同一时间点的 PostgreSQL 与历史 SQLite 一致性备份并记录当前镜像标识。最新治理数据迁移链为 `009 → 010 → 011 → 012 → 013 → 014`，当前 head 为 `014`；Compose 启动时会执行 `alembic upgrade head`。首次升级到包含 `resolve_project_scope` 的版本时，必须先按第 4 步创建并备份 `mcp_project_scope_secret`，否则新 Adapter 会拒绝启动。拉取新提交后，在新的空目录重新物化和测试，构建新的不可变镜像；只有迁移对账、14 工具契约和评测门禁通过后，才更新 `compose.env` 中的三个镜像标识并执行 `docker compose up -d --no-build`。若迁移或上线失败，停止新容器并恢复同一时间点的 PostgreSQL、历史目录和旧镜像标识；禁止只回滚容器而保留新数据库。
 
 仓库不包含生产数据和 Secret，因此只备份 Git 仓库不足以灾难恢复。尤其不能丢失 `mcp_project_scope_secret`，否则无法继续为同一用户和仓库派生原有项目范围。
 
@@ -391,7 +396,7 @@ Codex 不会自动信任第三方钩子；插件更新并改变钩子内容后�
 
 ### 4. 验证连接
 
-在新的 Codex 任务中运行 `$mem0:health`。该检查会核对令牌、11 个工具、生产契约以及最小读写链路，不会输出令牌或完整记忆正文；用户明确要求“深度检查”时，还会只读审查重复、陈旧和低置信度记忆。
+在新的 Codex 任务中运行 `$mem0:health`。该检查会核对令牌、14 个工具、生产契约以及最小读写链路，不会输出令牌或完整记忆正文；用户明确要求“深度检查”时，还会只读审查重复、陈旧和低置信度记忆。
 
 ## 钩子行为
 
@@ -401,12 +406,12 @@ Codex 不会自动信任第三方钩子；插件更新并改变钩子内容后�
 | `SessionStart` | 启动、恢复或压缩后 | 首次自动解析新仓库的跨机器范围，检索项目目标、决定、待办和偏好；压缩后提取并保存真实 `isCompactSummary` 摘要 |
 | `UserPromptSubmit` | 每次提交提示 | 跳过纯确认和忽略项；复杂请求并发执行 2～4 个互补查询并去重 |
 | `PostToolUse` | Mem0 或命令工具结束后 | 记录会话统计；检测命令错误并检索历史解决记录 |
-| `Stop` | 每轮助手输出结束 | 通过质量门禁后提取长期记忆，并按保留策略设置过期时间 |
-| `PreCompact` | 手动或自动压缩前 | 从最近转录保存压缩前总结 |
+| `Stop` | 每轮助手输出结束 | 以 `risk_assessed` 模式提取有证据的长期记忆；高置信且无冲突时晋升，中等置信、助手推断、重复或冲突内容进入候选，低质量内容跳过 |
+| `PreCompact` | 手动或自动压缩前 | 从最近转录生成压缩前总结；截断来源不再绕过质量门禁，只能进入候选区 |
 
 `SessionStart` 首次启动时还会扫描 `CLAUDE.md`、`AGENTS.md`、`.cursorrules`、`.windsurfrules` 和 `mem0.md`，按标题分块后以 `infer=false` 导入；每个文件最多读取 100 KB，文件超过限制时不会上传，并会按精确标记安全清理此前由插件导入的旧版本。本地 SHA-256 状态会跳过未变化内容，文件更新或删除后只清理远端搜索结果中项目、来源文件、内容哈希和导入格式均精确匹配的旧分块。本地状态中的未确认 ID 不会直接触发删除。导入前会先持久化待完成状态；文件更新时会保留上一份有效版本，直到新分块序号完整覆盖、写入验证和旧分块逐 ID 清理全部成功。查询、写入或清理暂时失败时保留可续跑状态，并在下次启动恢复；不同项目和项目映射的并发更新都会在文件锁内合并，避免互相覆盖。
 
-自动总结读取最近 12 条用户/助手消息，最多处理 50,000 字符，同时记录分支、触达文件和会话内 Mem0 操作计数。写入使用 `messages` 与 `infer=true`，模型生成的正文始终标记为 `assistant`，避免误记为用户观点；metadata 包含 `type`、`confidence`、`session_id`、分支和项目内相对文件路径。写入前会清除常见系统标签并脱敏普通文本及 JSON 中的令牌、密码和认证头；会话状态使用文件锁合并更新，摘要去重键按 `project_id` 隔离，短消息、寒暄和空内容会被跳过，同一项目中 `Stop` 与 `PreCompact` 的相同正文也不会重复保存。
+自动总结读取最近 12 条用户/助手消息，最多处理 50,000 字符，同时记录证据角色、来源范围、验证状态、分支、触达文件和会话内 Mem0 操作计数。写入使用 `messages`、`infer=true` 与 `write_mode=risk_assessed`，模型生成的正文始终标记为 `assistant`，避免误记为用户观点；metadata 包含 `type`、`confidence`、`session_id`、来源和项目内相对文件路径。模型生成的 `linked_memory_ids` 必须能映射到本次真实检索结果，未知 ID 会被拒绝。写入前会清除常见系统标签并脱敏普通文本及 JSON 中的令牌、密码和认证头；会话状态使用文件锁合并更新，摘要去重键按 `project_id` 隔离，短消息、寒暄和空内容会被跳过，同一项目中 `Stop` 与 `PreCompact` 的相同正文也不会重复保存。
 
 ## 本地设置与 `mem0.md`
 
@@ -501,7 +506,7 @@ python3 plugins/mem0/scripts/mem0_self_hosted.py --clear-project --cwd "/你的�
 
 解析优先级为本机显式映射、服务端同步范围、本机自动范围。已有本机范围的旧仓库不会自动切换，`--current-project` 会返回 `migration_required=true`；确认后运行 `--sync-project`，该命令也可强制刷新当前 Key 的缓存。没有 Git 远端时继续使用完整的本机范围；服务暂时不可用时只保留本机读取，并暂停自动导入、会话总结和所有 Mem0 变更工具，避免后续切换服务端范围后形成两套记忆，后续启动会自动重试。需要明确使用可写本机范围时，可设置 `auto_sync_project=false`。`--clear-project` 会清除当前工作区的显式映射和所有凭据下的对应同步缓存，下次启动重新解析。旧范围里的记忆不会自动迁移或删除。
 
-自托管服务现提供 11 个工具：旧 6 个工具保持兼容，并增加 `get_memory_history`、`list_entities`、`resolve_project_scope`、`delete_all_memories` 和 `delete_entities`。同时支持受限 metadata/filters、分页、过期时间和真实 rerank。项目与运行实体从受管记忆推导，不等同于官方云端实体目录；搜索通过一次受限查询同时覆盖当前项目和全局范围，再按分数返回结果。
+自托管服务现提供 14 个工具：旧 11 个工具保持参数和基础响应兼容，并增加 `list_memory_candidates`、`review_memory_candidate` 和 `submit_memory_feedback`。`add_memory` 新增可选 `write_mode`，默认仍为兼容旧客户端的 `direct`。同时支持受限 metadata/filters、分页、过期时间、单次 RRF、扩大后的 rerank 候选池、反馈排序和有效使用 Decay。项目与运行实体从受管记忆推导，不等同于官方云端实体目录；搜索通过受限查询覆盖当前项目和全局范围，并返回完整评分解释和检索状态。
 
 两个批量工具在插件配置中默认禁用。需要使用时必须由用户明确启用，并遵循“预览 → 明确确认 → 5 分钟 HMAC 令牌执行”的流程；服务端持久化删除进度，同一令牌只恢复未完成操作或返回既有结果，不支持用户级或全局清空。
 
@@ -568,11 +573,11 @@ python plugins\mem0\scripts\mem0_self_hosted.py --check
 python3 plugins/mem0/scripts/mem0_self_hosted.py --check
 ```
 
-该命令不仅核对 11 个工具，还会把生产 `tools/list` 的参数、必填项、类型、默认值、枚举和四项 `ToolAnnotations` 与仓库快照比较；发现漂移时返回失败，但不会输出令牌或记忆正文。
+该命令不仅核对 14 个工具，还会把生产 `tools/list` 的参数、必填项、类型、默认值、枚举和四项 `ToolAnnotations` 与仓库快照比较；发现漂移时返回失败，但不会输出令牌或记忆正文。
 
 GitHub Actions 会在 Ubuntu、Windows 和 macOS 上分别执行仓库校验与完整单元测试。
 
-Linux 任务还会安装 `services/mem0-mcp/requirements.lock` 并运行 Adapter 的鉴权、内部接口和真实 ASGI Bearer 链路测试；生产 Adapter 的 Dockerfile 与锁定源码均位于 `services/mem0-mcp`。Mem0 服务任务使用隔离 PostgreSQL 验证 `006 → 011 → 006 → 011` 迁移往返、服务测试、PGVector 类型过滤、5001 条回填和跨进程恢复。Dashboard 任务使用 Node 22 与 pnpm 10.34.2 执行格式、类型、构建、生产依赖审计和运行镜像健康检查；三个生产镜像还会分别执行 ARM64 构建验证。
+Linux 任务还会安装 `services/mem0-mcp/requirements.lock` 并运行 Adapter 的鉴权、内部接口、真实 ASGI Bearer 链路和实际 `tools/list` 14 工具快照测试；生产 Adapter 的 Dockerfile 与锁定源码均位于 `services/mem0-mcp`。Mem0 服务任务使用隔离 PostgreSQL 验证 `006 → 014 → 006 → 014` 迁移往返、服务测试、Python 统一记忆契约、PGVector 类型过滤、5001 条回填和跨进程恢复。Dashboard 任务使用 Node 22 与 pnpm 10.34.2 执行格式、类型、构建、生产依赖审计和运行镜像健康检查；独立 TypeScript SDK 任务验证持久化 SQLite 历史、共享黄金契约和 PGVector 全文检索配置；三个生产镜像还会分别执行 ARM64 构建验证。
 
 当前实现还通过以下验收：
 
@@ -580,8 +585,9 @@ Linux 任务还会安装 `services/mem0-mcp/requirements.lock` 并运行 Adapter
 - 完整生命周期脚本单元测试，覆盖三系统路径语义、恢复状态机和安全边界。
 - 生产 `messages + infer=true`、metadata、到期日和 rerank 探针。
 - `update_memory` metadata 合并、置顶取消和单条清理探针。
-- 生产 11 工具契约与 `mcp-schema.snapshot.json` 一致性检查。
-- 治理检索、项目权限、后台任务取消、备份数量限制和 PostgreSQL 原子替换恢复测试。
+- 生产 14 工具契约与 `mcp-schema.snapshot.json` 一致性检查。
+- 风险分级、候选隔离、跨 SDK 黄金契约、版本化反馈、有效使用 Decay、Dream 恢复重试和评测发布门禁测试。
+- 治理检索、项目权限、后台任务取消、5000 条在线治理、100000 条备份容量和 PostgreSQL 原子替换恢复测试。
 - Dashboard 格式、TypeScript 类型、生产构建、依赖审计和 `/api/health` 运行烟测。
 
 ## 许可证与来源

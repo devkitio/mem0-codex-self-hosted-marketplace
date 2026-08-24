@@ -1,9 +1,11 @@
 import asyncio
 import hashlib
+import json
 import logging
 import os
 import unittest
 import uuid
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import httpx
@@ -384,6 +386,12 @@ class AdapterAsyncTests(unittest.IsolatedAsyncioTestCase):
                 "arguments": {"repository_fingerprint": fingerprint},
             },
         }
+        tools_payload = {
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/list",
+            "params": {},
+        }
         transport = httpx.ASGITransport(app=server.app, raise_app_exceptions=False)
         headers = {
             "Accept": "application/json, text/event-stream",
@@ -422,16 +430,85 @@ class AdapterAsyncTests(unittest.IsolatedAsyncioTestCase):
                         "Authorization": f"Bearer {TEST_API_KEY}",
                     },
                 )
+                listed = await client.post(
+                    "/mcp",
+                    json=tools_payload,
+                    headers={
+                        **headers,
+                        "MCP-Protocol-Version": "2025-06-18",
+                        "Authorization": f"Bearer {TEST_API_KEY}",
+                    },
+                )
         self.assertEqual(accepted.status_code, 200)
         self.assertEqual(rejected.status_code, 401)
         self.assertGreaterEqual(unavailable.status_code, 500)
         self.assertNotEqual(unavailable.status_code, 401)
         self.assertEqual(resolved.status_code, 200)
+        self.assertEqual(listed.status_code, 200)
+        self.assertEqual(len(listed.json()["result"]["tools"]), 14)
         result = resolved.json()["result"]["structuredContent"]
         self.assertEqual(
             result["project_id"],
             server._project_scope_id("00000000-0000-0000-0000-000000000001", fingerprint),
         )
+
+    async def test_tools_list_matches_fourteen_tool_contract_snapshot(self):
+        runtime_tools = [
+            tool.model_dump(by_alias=True, exclude_none=True)
+            for tool in await server.mcp.list_tools()
+        ]
+        snapshot_path = Path(__file__).resolve().parents[2] / "plugins" / "mem0" / "mcp-schema.snapshot.json"
+        snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))["tools"]
+
+        def schema_types(schema):
+            values = []
+            if isinstance(schema.get("type"), str):
+                values.append(schema["type"])
+            for option in schema.get("anyOf", []):
+                if isinstance(option, dict) and isinstance(option.get("type"), str):
+                    values.append(option["type"])
+            return sorted(set(values))
+
+        def schema_enum(schema):
+            if isinstance(schema.get("enum"), list):
+                return schema["enum"]
+            for option in schema.get("anyOf", []):
+                if isinstance(option, dict) and isinstance(option.get("enum"), list):
+                    return option["enum"]
+            return None
+
+        normalized = {}
+        for tool in runtime_tools:
+            input_schema = tool["inputSchema"]
+            properties = input_schema.get("properties", {})
+            annotations = tool.get("annotations") or {}
+            normalized[tool["name"]] = {
+                "properties": sorted(properties),
+                "required": sorted(input_schema.get("required", [])),
+                "types": {name: schema_types(value) for name, value in properties.items()},
+                "defaults": {
+                    name: value["default"]
+                    for name, value in properties.items()
+                    if "default" in value
+                },
+                "enums": {
+                    name: enum
+                    for name, value in properties.items()
+                    if (enum := schema_enum(value)) is not None
+                },
+                "annotations": {
+                    name: annotations.get(name)
+                    for name in (
+                        "readOnlyHint",
+                        "destructiveHint",
+                        "idempotentHint",
+                        "openWorldHint",
+                    )
+                },
+            }
+
+        self.assertEqual(len(normalized), 14)
+        self.assertEqual(normalized, snapshot)
 
     async def test_request_keeps_authentication_modes_separate(self):
         await server._request("GET", "/ok", internal=True)
@@ -765,6 +842,7 @@ class AdapterAsyncTests(unittest.IsolatedAsyncioTestCase):
                 metadata={"kind": "decision"},
                 run_id="run-a",
                 infer=True,
+                write_mode="risk_assessed",
             )
         self.assertTrue(result["ok"])
         self.assertEqual(request.await_args.args, ("POST", "/internal/mcp/add"))
@@ -777,6 +855,103 @@ class AdapterAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["metadata"], {"kind": "decision"})
         self.assertEqual(payload["run_id"], "run-a")
         self.assertTrue(payload["infer"])
+        self.assertEqual(payload["write_mode"], "risk_assessed")
+
+        with self.assertRaisesRegex(ValueError, "write_mode"):
+            await server.add_memory(text="测试", write_mode="invalid")  # type: ignore[arg-type]
+
+    async def test_memory_candidates_enforce_scope_and_validate_review_input(self):
+        candidate_id = str(uuid.uuid4())
+        valid = {
+            "results": [
+                {
+                    "id": candidate_id,
+                    "project_id": "project-a",
+                    "status": "pending",
+                }
+            ]
+        }
+        request = AsyncMock(return_value=valid)
+        with patch.object(server, "_request", request):
+            result = await server.list_memory_candidates(project_id="project-a", limit=250)
+        self.assertEqual(result["count"], 1)
+        self.assertEqual(request.await_args.kwargs["json_body"]["limit"], 100)
+
+        out_of_scope = {
+            "results": [
+                {
+                    "id": candidate_id,
+                    "project_id": "project-b",
+                    "status": "pending",
+                }
+            ]
+        }
+        with patch.object(server, "_request", AsyncMock(return_value=out_of_scope)):
+            with self.assertRaisesRegex(RuntimeError, "越界结果"):
+                await server.list_memory_candidates(project_id="project-a")
+
+        with self.assertRaisesRegex(ValueError, "status"):
+            await server.list_memory_candidates(status="unknown")  # type: ignore[arg-type]
+        with self.assertRaisesRegex(ValueError, "必须提供 text"):
+            await server.review_memory_candidate(candidate_id, "edit", project_id="project-a")
+        with self.assertRaisesRegex(ValueError, "action"):
+            await server.review_memory_candidate(
+                candidate_id,
+                "unknown",  # type: ignore[arg-type]
+                project_id="project-a",
+            )
+
+    async def test_feedback_binds_actor_project_and_current_payload_version(self):
+        memory_id = str(uuid.uuid4())
+        retrieval_id = str(uuid.uuid4())
+        subject = str(uuid.uuid4())
+        payload_version = "a" * 64
+        request = AsyncMock(
+            return_value={
+                "ok": True,
+                "memory_id": memory_id,
+                "payload_version": payload_version,
+                "verdict": "correct",
+            }
+        )
+        token = server.AccessToken(
+            token="not-observed",
+            client_id="test",
+            subject=subject,
+            scopes=["mem0:mcp"],
+        )
+        with (
+            patch.object(server, "_owned", AsyncMock(return_value={"id": memory_id})),
+            patch.object(server, "get_access_token", return_value=token),
+            patch.object(server, "_request", request),
+        ):
+            result = await server.submit_memory_feedback(
+                memory_id,
+                "correct",
+                project_id="project-a",
+                reason="内容已核实",
+                retrieval_id=retrieval_id,
+            )
+
+        self.assertEqual(result["payload_version"], payload_version)
+        payload = request.await_args.kwargs["json_body"]
+        self.assertEqual(payload["project_id"], "project-a")
+        self.assertEqual(payload["actor_key"], f"mcp:{subject}")
+        self.assertEqual(payload["retrieval_id"], retrieval_id)
+
+        request.return_value = {
+            "ok": True,
+            "memory_id": memory_id,
+            "payload_version": "invalid",
+            "verdict": "correct",
+        }
+        with (
+            patch.object(server, "_owned", AsyncMock(return_value={"id": memory_id})),
+            patch.object(server, "get_access_token", return_value=token),
+            patch.object(server, "_request", request),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "无效响应"):
+                await server.submit_memory_feedback(memory_id, "correct", project_id="project-a")
 
     async def test_add_rejects_invalid_server_response(self):
         memory_id = str(uuid.uuid4())

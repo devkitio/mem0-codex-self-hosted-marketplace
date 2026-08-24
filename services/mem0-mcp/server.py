@@ -1078,15 +1078,19 @@ async def add_memory(
     metadata: dict[str, Any] | None = None,
     run_id: str | None = None,
     expiration_date: str | None = None,
+    write_mode: Literal["direct", "risk_assessed"] = "direct",
 ) -> dict[str, Any]:
-    """保存长期记忆。text 与 messages 二选一；expiration_date 使用 YYYY-MM-DD；省略 project_id 表示全局记忆。"""
+    """保存长期记忆。自动生命周期写入应使用 risk_assessed，用户主动保存保持 direct。"""
     project_id = _project(project_id)
     run_id = _entity_id(run_id, "run_id")
+    if write_mode not in {"direct", "risk_assessed"}:
+        raise ValueError("write_mode 必须是 direct 或 risk_assessed")
     payload: dict[str, Any] = {
         "messages": _messages(text, messages),
         "project_id": project_id,
         "metadata": _metadata(metadata),
         "infer": bool(infer),
+        "write_mode": write_mode,
     }
     if run_id:
         payload["run_id"] = run_id
@@ -1105,7 +1109,14 @@ async def add_memory(
         project_id=project_id,
         run_id=run_id,
     )
-    return {"ok": True, "results": [_clean(item) for item in rows]}
+    return {
+        "ok": data.get("status") not in {"partial"},
+        "status": data.get("status", "ok"),
+        "results": [_clean(item) for item in rows],
+        "candidate": data.get("candidate"),
+        "reason": data.get("reason"),
+        "duplicate_memory_id": data.get("duplicate_memory_id"),
+    }
 
 
 @mcp.tool(
@@ -1168,7 +1179,130 @@ async def search_memories(
         maximum=top_k,
     )
     rows.sort(key=lambda item: float(item.get("score") or 0), reverse=True)
-    return {"results": [_clean(item) for item in rows]}
+    return {
+        "results": [_clean(item) for item in rows],
+        "retrieval_id": data.get("retrieval_id"),
+        "retrieval_mode": data.get("retrieval_mode", "hybrid"),
+        "status": data.get("status", "ok" if rows else "no_results"),
+        "error": data.get("error"),
+    }
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False)
+)
+async def list_memory_candidates(
+    project_id: str | None = None,
+    status: Literal["pending", "promoted", "rejected", "archived"] | None = "pending",
+    limit: int = 50,
+) -> dict[str, Any]:
+    """列出当前 MCP 项目作用域内的候选记忆，供用户审核自动提取结果。"""
+    project_id = _project(project_id)
+    allowed_statuses = {"pending", "promoted", "rejected", "archived"}
+    if status is not None and status not in allowed_statuses:
+        raise ValueError("status 必须是 pending、promoted、rejected 或 archived")
+    limit = max(1, min(int(limit), 100))
+    data = await _request(
+        "POST",
+        "/internal/mcp/candidates",
+        json_body={"project_id": project_id, "status": status, "limit": limit},
+        internal=True,
+        timeout_seconds=READ_TIMEOUT,
+    )
+    rows = _result_rows(data, "候选记忆查询")
+    for row in rows:
+        try:
+            uuid.UUID(str(row.get("id")))
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("Mem0 候选记忆查询返回无效响应") from exc
+        if row.get("project_id") != project_id or row.get("status") not in allowed_statuses:
+            raise RuntimeError("Mem0 候选记忆查询返回越界结果")
+    return {"results": rows, "count": len(rows)}
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False)
+)
+async def review_memory_candidate(
+    candidate_id: str,
+    action: Literal["confirm", "reject", "edit"],
+    project_id: str | None = None,
+    text: str | None = None,
+    reason: str | None = None,
+) -> dict[str, Any]:
+    """确认、拒绝或编辑候选记忆；编辑后会重新执行敏感信息、重复和冲突检查。"""
+    candidate_id = _memory_id(candidate_id)
+    project_id = _project(project_id)
+    if action not in {"confirm", "reject", "edit"}:
+        raise ValueError("action 必须是 confirm、reject 或 edit")
+    if action == "edit" and text is None:
+        raise ValueError("编辑候选记忆时必须提供 text")
+    payload = {
+        "candidate_id": candidate_id,
+        "project_id": project_id,
+        "action": action,
+        "text": _text(text, MAX_TEXT, "text") if text is not None else None,
+        "reason": _text(reason, 2000, "reason") if reason is not None else None,
+    }
+    data = await _request(
+        "POST",
+        "/internal/mcp/candidates/review",
+        json_body=payload,
+        internal=True,
+        timeout_seconds=TIMEOUT,
+    )
+    if not isinstance(data, dict) or str(data.get("id")) != candidate_id or data.get("project_id") != project_id:
+        raise RuntimeError("Mem0 候选审核返回无效响应")
+    return data
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False)
+)
+async def submit_memory_feedback(
+    memory_id: str,
+    verdict: Literal["correct", "useless", "critical_error"],
+    project_id: str | None = None,
+    reason: str | None = None,
+    retrieval_id: str | None = None,
+) -> dict[str, Any]:
+    """对当前记忆版本提交正确、无用或严重错误反馈，并让反馈影响后续排序。"""
+    memory_id = _memory_id(memory_id)
+    project_id = _project(project_id)
+    await _owned(memory_id, project_id)
+    access_token = get_access_token()
+    subject = access_token.subject if access_token is not None else None
+    try:
+        actor_id = str(uuid.UUID(str(subject)))
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("MCP 认证上下文缺少有效主体") from exc
+    if retrieval_id is not None:
+        try:
+            retrieval_id = str(uuid.UUID(retrieval_id))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("retrieval_id 必须是有效 UUID") from exc
+    data = await _request(
+        "POST",
+        "/internal/mcp/feedback",
+        json_body={
+            "memory_id": memory_id,
+            "project_id": project_id,
+            "verdict": verdict,
+            "reason": _text(reason, 2000, "reason") if reason is not None else None,
+            "retrieval_id": retrieval_id,
+            "actor_key": f"mcp:{actor_id}",
+        },
+        internal=True,
+        timeout_seconds=TIMEOUT,
+    )
+    if (
+        not isinstance(data, dict)
+        or data.get("memory_id") != memory_id
+        or data.get("verdict") != verdict
+        or not HASH_RE.fullmatch(str(data.get("payload_version") or ""))
+    ):
+        raise RuntimeError("Mem0 记忆反馈返回无效响应")
+    return data
 
 
 @mcp.tool(

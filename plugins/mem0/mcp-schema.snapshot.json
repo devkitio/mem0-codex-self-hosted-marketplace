@@ -2,7 +2,7 @@
   "snapshot_version": 1,
   "tools": {
     "add_memory": {
-      "properties": ["expiration_date", "infer", "messages", "metadata", "project_id", "run_id", "text"],
+      "properties": ["expiration_date", "infer", "messages", "metadata", "project_id", "run_id", "text", "write_mode"],
       "required": [],
       "types": {
         "expiration_date": ["null", "string"],
@@ -11,7 +11,8 @@
         "metadata": ["null", "object"],
         "project_id": ["null", "string"],
         "run_id": ["null", "string"],
-        "text": ["null", "string"]
+        "text": ["null", "string"],
+        "write_mode": ["string"]
       },
       "defaults": {
         "expiration_date": null,
@@ -20,9 +21,10 @@
         "metadata": null,
         "project_id": null,
         "run_id": null,
-        "text": null
+        "text": null,
+        "write_mode": "direct"
       },
-      "enums": {},
+      "enums": {"write_mode": ["direct", "risk_assessed"]},
       "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": false, "openWorldHint": false}
     },
     "delete_all_memories": {
@@ -111,6 +113,18 @@
       "enums": {"entity_type": ["project", "run"]},
       "annotations": {"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false}
     },
+    "list_memory_candidates": {
+      "properties": ["limit", "project_id", "status"],
+      "required": [],
+      "types": {
+        "limit": ["integer"],
+        "project_id": ["null", "string"],
+        "status": ["null", "string"]
+      },
+      "defaults": {"limit": 50, "project_id": null, "status": "pending"},
+      "enums": {"status": ["pending", "promoted", "rejected", "archived"]},
+      "annotations": {"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false}
+    },
     "resolve_project_scope": {
       "properties": ["repository_fingerprint"],
       "required": ["repository_fingerprint"],
@@ -118,6 +132,20 @@
       "defaults": {},
       "enums": {},
       "annotations": {"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false}
+    },
+    "review_memory_candidate": {
+      "properties": ["action", "candidate_id", "project_id", "reason", "text"],
+      "required": ["action", "candidate_id"],
+      "types": {
+        "action": ["string"],
+        "candidate_id": ["string"],
+        "project_id": ["null", "string"],
+        "reason": ["null", "string"],
+        "text": ["null", "string"]
+      },
+      "defaults": {"project_id": null, "reason": null, "text": null},
+      "enums": {"action": ["confirm", "reject", "edit"]},
+      "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": false, "openWorldHint": false}
     },
     "search_memories": {
       "properties": ["explain", "filters", "project_id", "query", "rerank", "show_expired", "threshold", "top_k"],
@@ -143,6 +171,20 @@
       },
       "enums": {},
       "annotations": {"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false}
+    },
+    "submit_memory_feedback": {
+      "properties": ["memory_id", "project_id", "reason", "retrieval_id", "verdict"],
+      "required": ["memory_id", "verdict"],
+      "types": {
+        "memory_id": ["string"],
+        "project_id": ["null", "string"],
+        "reason": ["null", "string"],
+        "retrieval_id": ["null", "string"],
+        "verdict": ["string"]
+      },
+      "defaults": {"project_id": null, "reason": null, "retrieval_id": null},
+      "enums": {"verdict": ["correct", "useless", "critical_error"]},
+      "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false}
     },
     "update_memory": {
       "properties": ["expiration_date", "memory_id", "metadata", "project_id", "text"],

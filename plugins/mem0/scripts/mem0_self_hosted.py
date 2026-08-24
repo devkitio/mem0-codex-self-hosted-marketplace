@@ -89,8 +89,11 @@ MEM0_TOOL_NAMES = {
     "get_memory",
     "get_memory_history",
     "list_entities",
+    "list_memory_candidates",
+    "review_memory_candidate",
     "resolve_project_scope",
     "update_memory",
+    "submit_memory_feedback",
 }
 MUTATING_TOOLS = {
     "add_memory",
@@ -98,6 +101,8 @@ MUTATING_TOOLS = {
     "delete_memory",
     "delete_all_memories",
     "delete_entities",
+    "review_memory_candidate",
+    "submit_memory_feedback",
 }
 FILE_PATTERN = re.compile(
     r"[A-Za-z0-9_./\\-]+\.(?:py|ts|tsx|js|jsx|rs|go|rb|java|sh|ps1|yaml|yml|json|toml|md|sql|css|html)"
@@ -1667,7 +1672,9 @@ def mark_summaries_saved(session_id: str, digests: dict[str, str]) -> None:
 
 
 def should_save_summary(text: str, files: list[str], policy: dict[str, Any]) -> bool:
-    if len(text) < 120:
+    if len(text) < 40:
+        return False
+    if len(text) < 120 and not files and not SUMMARY_SIGNAL_PATTERN.search(text):
         return False
     message_bodies = [
         _normalized_prompt(line.split("：", 1)[-1])
@@ -1801,6 +1808,13 @@ def save_summary(
         if memory_type == "compact_summary"
         else ("pre_compact" if kind == "上下文压缩前总结" else "stop"),
         "memory_kind": memory_type,
+        "source_type": "codex_hook",
+        "source_id": session_id[:200] if session_id else None,
+        "evidence_role": "assistant_summary",
+        "source_range": "最近 12 条有效对话",
+        "verification_status": "unverified",
+        "partial_source": kind in {"上下文压缩前总结", "上下文压缩总结"},
+        "observed_at": datetime.now(timezone.utc).isoformat(),
     }
     if session_id:
         metadata["session_id"] = session_id[:200]
@@ -1813,6 +1827,7 @@ def save_summary(
         "project_id": project_id,
         "infer": True,
         "metadata": metadata,
+        "write_mode": "risk_assessed",
     }
     retention_days = retention_days_for(memory_type, active_settings, active_policy)
     if retention_days > 0:
@@ -2765,7 +2780,7 @@ def _handle_event(hook_input: dict[str, Any]) -> None:
                     settings,
                     policy,
                     memory_type="compact_summary",
-                    force=True,
+                    force=False,
                 )
         if not settings.get("auto_search", True):
             debug_event(settings, "session_search_disabled")

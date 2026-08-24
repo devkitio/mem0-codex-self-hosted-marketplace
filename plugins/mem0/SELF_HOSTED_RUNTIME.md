@@ -13,7 +13,7 @@
 
 ## 工具签名
 
-- `add_memory(text?, messages?, project_id?, infer?, metadata?, run_id?, expiration_date?)`
+- `add_memory(text?, messages?, project_id?, infer?, metadata?, run_id?, expiration_date?, write_mode?)`
 - `search_memories(query, project_id?, top_k?, threshold?, filters?, rerank?, explain?, show_expired?)`
 - `get_memories(project_id?, limit?, page?, page_size?, filters?, sort_by?, sort_order?, show_expired?)`
 - `get_memory(memory_id, project_id?)`
@@ -24,8 +24,11 @@
 - `resolve_project_scope(repository_fingerprint)`
 - `delete_all_memories(project_id, run_id?, confirmation_token?)`
 - `delete_entities(entity_type, entity_id, project_id?, confirmation_token?)`
+- `list_memory_candidates(project_id?, status?, limit?)`
+- `review_memory_candidate(candidate_id, action, project_id?, text?, reason?)`
+- `submit_memory_feedback(memory_id, verdict, project_id?, reason?, retrieval_id?)`
 
-`text` 与 `messages` 必须且只能提供一个。`get_memories.limit` 仅用于兼容旧调用；新调用使用 `page/page_size`，单页最多 20 条，并处理结构化返回中的 `results/count/next/previous/partial`。出现 `partial=true` 时必须明确说明结果可能不完整。`list_entities` 默认排除过期记忆，只有显式传入 `show_expired=true` 才会计入。
+`text` 与 `messages` 必须且只能提供一个。`write_mode` 默认为兼容旧调用和用户主动保存的 `direct`；生命周期自动写入必须使用 `risk_assessed`，由服务端决定直接晋升、进入候选或跳过。候选只能在当前 MCP 项目范围内读取和审核；`edit` 必须提供新正文并重新执行敏感信息、重复和冲突检查。反馈由服务端绑定当前 `payload_version` 与认证主体。`get_memories.limit` 仅用于兼容旧调用；新调用使用 `page/page_size`，单页最多 20 条，并处理结构化返回中的 `results/count/next/previous/partial`。出现 `partial=true` 时必须明确说明结果可能不完整。`list_entities` 默认排除过期记忆，只有显式传入 `show_expired=true` 才会计入。
 
 ## 身份与项目边界
 
@@ -39,7 +42,7 @@
 - `metadata` 和 `filters` 只用于非保留业务字段，并受服务端的大小、深度、字段和操作符限制。保留 metadata 字段为 `user_id`、`agent_id`、`app_id`、`mcp_owner`、`scope`、`project_id`、`source`、`run_id`；从读取结果再次写入前必须全部剔除。顶层 `run_id` 仍可在 `add_memory` 中使用。不要在客户端拼入身份过滤条件。
 - `list_entities` 只枚举从受管记忆推导出的 `project` 和 `run`。列出全部项目时不要传 `project_id`；列出运行时传入所属项目。
 
-生命周期脚本只在语义明确时补齐项目范围：普通读写、历史和 `delete_all_memories` 补当前项目；`delete_entities(entity_type="run")` 补当前项目；`list_entities`、`resolve_project_scope` 与项目实体删除不自动补项目，避免把跨项目枚举、范围解析或目标项目错误限缩。
+生命周期脚本只在语义明确时补齐项目范围：普通读写、历史、候选审核、反馈和 `delete_all_memories` 补当前项目；`delete_entities(entity_type="run")` 补当前项目；`list_entities`、`resolve_project_scope` 与项目实体删除不自动补项目，避免把跨项目枚举、范围解析或目标项目错误限缩。
 
 ## 生命周期设置与项目策略
 
@@ -64,9 +67,9 @@
 - `Categories` 只指导 `infer=true` 的自动总结分类，不伪装成官方云端类别目录。
 - `Retention` 可按 `metadata.type` 设置分类保留期，例如 `session_summary: 90d`、`compact_summary: 90d`、`decision: forever`；旧的 `days`、`retention_days` 和 `retention_session_days` 继续作为会话总结保留期别名。`exclude`/`ignore` 可排除不应自动保存的内容。
 
-复杂提示最多产生四个确定性查询，客户端并发请求后按记忆 ID 去重；单个查询失败允许使用其他查询的结果。纯确认、寒暄、命中 `Ignore` 的提示不会触发检索。自动总结只有在包含决定、目标、完成事项、验证、风险、待办、文件触达等长期价值信号时才写入；使用 `messages=[{"role":"assistant",...}]` 防止把模型观点误归因给用户，并写入 `type/confidence/session_id/branch/files_touched` 等非保留 metadata。`files_touched` 必须是项目内相对路径，普通文本和 JSON 形式的凭据必须先脱敏；会话计数和摘要去重状态必须在文件锁内合并更新，摘要哈希与正文哈希去重键必须按 `project_id` 隔离，`Stop`、`PreCompact` 与压缩后 `SessionStart` 只在同一项目内去重。
+复杂提示最多产生四个确定性查询，客户端并发请求后按记忆 ID 去重；单个查询失败允许使用其他查询的结果。纯确认、寒暄、命中 `Ignore` 的提示不会触发检索。自动总结只有在包含决定、目标、完成事项、验证、风险、待办、文件触达等长期价值信号时才提交风险评估；使用 `messages=[{"role":"assistant",...}]` 防止把模型观点误归因给用户，并写入 `type/confidence/session_id/source_type/branch/files_touched` 等非保留 metadata。高置信、来源完整且无冲突的明确用户陈述或工具验证结果可以直接晋升；助手推断、截断来源、中等置信、重复或冲突内容进入候选；低置信、寒暄、过程描述和无长期价值内容跳过。`PreCompact` 不得绕过门禁。模型返回的 `linked_memory_ids` 只能引用本次真实检索映射。`files_touched` 必须是项目内相对路径，普通文本和 JSON 形式的凭据必须先脱敏；会话计数和摘要去重状态必须在文件锁内合并更新，摘要哈希与正文哈希去重键必须按 `project_id` 隔离，`Stop`、`PreCompact` 与压缩后 `SessionStart` 只在同一项目内去重。
 
-仓库中的 `mcp-schema.snapshot.json` 固定 11 个工具的参数、必填项、类型、默认值、枚举和四项 `ToolAnnotations`。`scripts/mem0_self_hosted.py --check` 必须实时比较生产 `tools/list`；差异只报告工具或字段名，不输出 schema 正文、令牌或记忆内容。
+仓库中的 `mcp-schema.snapshot.json` 固定 14 个工具的参数、必填项、类型、默认值、枚举和四项 `ToolAnnotations`。`scripts/mem0_self_hosted.py --check` 必须实时比较生产 `tools/list`；差异只报告工具或字段名，不输出 schema 正文、令牌或记忆内容。
 
 ## 破坏性操作
 

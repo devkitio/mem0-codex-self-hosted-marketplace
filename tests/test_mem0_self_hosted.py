@@ -2627,9 +2627,14 @@ class Mem0SelfHostedTests(unittest.TestCase):
         self.assertEqual(arguments["metadata"]["files_touched"], ["src/app.py"])
         self.assertNotIn(str(base), arguments["messages"][0]["content"])
 
-    def test_契约快照锁定十一工具和关键枚举(self):
+    def test_契约快照锁定十四工具和关键枚举(self):
         snapshot = json.loads(mem0.SCHEMA_SNAPSHOT_PATH.read_text(encoding="utf-8"))
         self.assertEqual(set(snapshot["tools"]), mem0.MEM0_TOOL_NAMES)
+        self.assertEqual(len(snapshot["tools"]), 14)
+        self.assertEqual(
+            snapshot["tools"]["add_memory"]["enums"]["write_mode"],
+            ["direct", "risk_assessed"],
+        )
         self.assertEqual(
             snapshot["tools"]["get_memories"]["enums"]["sort_order"],
             ["asc", "desc"],
