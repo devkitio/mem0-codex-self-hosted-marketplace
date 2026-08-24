@@ -130,12 +130,17 @@ jobs:
         working-directory: .mem0-source/server
         run: |
           alembic upgrade 006
-          alembic upgrade 011
+          alembic upgrade 014
           alembic downgrade 006
-          alembic upgrade 011
+          alembic upgrade 014
       - name: 运行 Mem0 服务单元测试
         working-directory: .mem0-source/server
         run: python -m unittest -v test_main.py test_self_hosted_features.py test_platform_operations.py
+      - name: 运行 Python 统一记忆契约测试
+        working-directory: .mem0-source
+        env:
+          PYTHONPATH: .:server
+        run: python -m unittest discover -s tests -p test_memory_contract_v2.py -v
       - name: 验证 PGVector 类型过滤
         working-directory: .mem0-source/server
         env:
@@ -207,6 +212,37 @@ jobs:
           done
           docker logs "$container"
           exit 1
+
+  validate-typescript-contract:
+    name: 验证 TypeScript 记忆契约（Node 22）
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: 设置 Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.12"
+      - name: 设置 Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22"
+      - name: 物化固定 Mem0 源码
+        run: python scripts/materialize_mem0.py .mem0-source
+      - name: 启用锁定的 pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.5.2 --activate
+      - name: 冻结安装 TypeScript SDK 依赖
+        working-directory: .mem0-source/mem0-ts
+        run: pnpm install --frozen-lockfile
+      - name: 构建 SQLite 原生依赖
+        working-directory: .mem0-source/mem0-ts
+        run: pnpm rebuild better-sqlite3
+      - name: 运行 TypeScript 统一记忆契约与 PGVector 测试
+        working-directory: .mem0-source/mem0-ts
+        run: pnpm exec jest src/oss/src/storage/MemoryContract.test.ts src/oss/tests/pgvector.unit.test.ts --runInBand
 
   build-arm64:
     name: 构建 ARM64 镜像（${{ matrix.name }}）

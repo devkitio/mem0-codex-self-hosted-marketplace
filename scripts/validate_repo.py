@@ -28,6 +28,9 @@ MEM0_TOOLS = {
     "resolve_project_scope",
     "delete_all_memories",
     "delete_entities",
+    "list_memory_candidates",
+    "review_memory_candidate",
+    "submit_memory_feedback",
 }
 BULK_TOOLS = {"delete_all_memories", "delete_entities"}
 READ_ONLY_TOOLS = {
@@ -37,6 +40,7 @@ READ_ONLY_TOOLS = {
     "get_memory_history",
     "list_entities",
     "resolve_project_scope",
+    "list_memory_candidates",
 }
 DESTRUCTIVE_TOOLS = {
     "update_memory",
@@ -305,7 +309,20 @@ def main() -> None:
         assert old_path in {
             ".dockerignore",
             ".gitignore",
+            "mem0/configs/vector_stores/pgvector.py",
+            "mem0/memory/main.py",
+            "mem0/memory/storage.py",
             "mem0/vector_stores/pgvector.py",
+            "mem0-ts/src/oss/src/memory/index.ts",
+            "mem0-ts/src/oss/src/storage/MemoryContract.test.ts",
+            "mem0-ts/src/oss/src/storage/MemoryHistoryManager.ts",
+            "mem0-ts/src/oss/src/storage/SQLiteManager.ts",
+            "mem0-ts/src/oss/src/storage/base.ts",
+            "mem0-ts/src/oss/src/utils/factory.ts",
+            "mem0-ts/src/oss/src/vector_stores/pgvector.ts",
+            "mem0-ts/src/oss/tests/pgvector.unit.test.ts",
+            "tests/fixtures/memory_contract_v2.json",
+            "tests/test_memory_contract_v2.py",
             "tests/vector_stores/test_pgvector.py",
         } or old_path.startswith(("server/", "openresty/")), (
             f"Mem0 生产补丁修改了未授权路径：{old_path}"
@@ -317,12 +334,24 @@ def main() -> None:
         "server/alembic/versions/007_mcp_deletion_operations.py",
         "server/alembic/versions/008_api_key_purpose.py",
         "server/alembic/versions/011_platform_operations.py",
+        "server/alembic/versions/012_memory_quality_model.py",
+        "server/alembic/versions/013_retrieval_feedback.py",
+        "server/alembic/versions/014_evaluation_v2.py",
         "server/config.py",
+        "server/memory_quality_service.py",
         "server/mcp_scope.py",
         "server/prod.Dockerfile",
         "server/requirements.lock",
+        "server/scripts/backfill_memory_quality.py",
         "server/scripts/backfill_mcp_scope.py",
+        "server/scripts/retry_memory_mutations.py",
         "server/test_main.py",
+        "tests/fixtures/memory_contract_v2.json",
+        "tests/test_memory_contract_v2.py",
+        "mem0-ts/src/oss/src/storage/MemoryContract.test.ts",
+        "mem0-ts/src/oss/src/vector_stores/pgvector.ts",
+        "mem0-ts/src/oss/tests/pgvector.unit.test.ts",
+        "mem0/configs/vector_stores/pgvector.py",
     }
     assert required_patch_paths <= {path for _, path in patch_paths}, (
         "Mem0 生产补丁缺少关键新增文件"
@@ -391,11 +420,14 @@ def main() -> None:
         "scripts/materialize_mem0.py",
         ".mem0-source/server/requirements.lock",
         "alembic downgrade 006",
-        "alembic upgrade 011",
         "verify-pgvector-filter-integration",
         "verify-backfill-integration",
         "prepare-restart",
         "verify-restart",
+        "alembic upgrade 014",
+        "test_memory_contract_v2.py",
+        "MemoryContract.test.ts",
+        "pgvector.unit.test.ts",
         "node-version: \"22\"",
         "pnpm install --frozen-lockfile",
         "pnpm run typecheck",
@@ -433,7 +465,7 @@ def main() -> None:
     for name in MEM0_TOOLS:
         assert f"`{name}(" in runtime_contract, f"运行时约定缺少工具：{name}"
     assert "默认禁用" in runtime_contract and all(name in runtime_contract for name in BULK_TOOLS)
-    print("验证通过：市场、MCP 十一工具、六类增强钩子、运行时边界和 16 个技能均有效")
+    print("验证通过：市场、MCP 14 工具、六类增强钩子、运行时边界和 16 个技能均有效")
 
 
 if __name__ == "__main__":
