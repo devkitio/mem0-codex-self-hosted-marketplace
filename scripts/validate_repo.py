@@ -8,6 +8,7 @@ import hashlib
 import json
 import re
 import sys
+from datetime import date
 from pathlib import Path, PurePosixPath
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -460,6 +461,20 @@ def main() -> None:
         "docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a",
     ):
         assert action_sha in workflow, f"CI Action 未固定到审查 SHA：{action_sha}"
+    trivy_ignore = (ROOT / ".trivyignore.yaml").read_text(encoding="utf-8")
+    waiver_blocks = re.findall(
+        r"(?ms)^  - id: (CVE-\d{4}-\d+)\n(.*?)(?=^  - id:|\Z)",
+        trivy_ignore,
+    )
+    assert waiver_blocks, "Trivy 漏洞豁免清单为空"
+    for vulnerability_id, block in waiver_blocks:
+        statement = re.search(r"^    statement: (.+)$", block, re.MULTILINE)
+        expiry = re.search(r"^    expired_at: (\d{4}-\d{2}-\d{2})$", block, re.MULTILINE)
+        assert statement and statement.group(1).strip(), f"Trivy 豁免缺少原因：{vulnerability_id}"
+        assert expiry and date.fromisoformat(expiry.group(1)) > date.today(), (
+            f"Trivy 豁免已过期或缺少有效期：{vulnerability_id}"
+        )
+    assert "--ignorefile /workspace/.trivyignore.yaml" in workflow, "CI 未使用受控 Trivy 豁免清单"
     root_gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
     for ignored in (
         "/.mem0-source/",

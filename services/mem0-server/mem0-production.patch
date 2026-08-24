@@ -3016,12 +3016,14 @@ index 1f9148c7b5e1bcefbd63a00d1a11953c8e5d81ac..fbb135980c882f96dee5a42881d09bac
 +/playwright-report
 +/test-results
 diff --git a/server/dashboard/Dockerfile b/server/dashboard/Dockerfile
-index 0f271e1ee44e61d156f9c789937cebde371381a1..0c3dad226b93718bbe850cdf4a0cc770b55db29f 100644
+index 0f271e1ee44e61d156f9c789937cebde371381a1..cc7db182e3e124dd86f82b82f68faf5b69370b44 100644
 --- a/server/dashboard/Dockerfile
 +++ b/server/dashboard/Dockerfile
-@@ -1 +1 @@
+@@ -1,2 +1,2 @@
 -FROM node:20-alpine AS base
+-RUN apk add --no-cache libc6-compat
 +FROM --platform=$BUILDPLATFORM node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32 AS base
++RUN apk upgrade --no-cache && apk add --no-cache libc6-compat
 @@ -3,0 +4,3 @@ WORKDIR /app
 +ENV PNPM_HOME=/pnpm
 +ENV PATH=$PNPM_HOME:$PATH
@@ -3054,7 +3056,7 @@ index 0f271e1ee44e61d156f9c789937cebde371381a1..0c3dad226b93718bbe850cdf4a0cc770
 -FROM base AS runner
 +# 运行时镜像保持为目标平台，构建阶段则使用原生平台以避免 QEMU 执行 Node.js
 +FROM node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32 AS runner
-+RUN apk add --no-cache libc6-compat
++RUN apk upgrade --no-cache && apk add --no-cache libc6-compat
 @@ -38 +37 @@ RUN addgroup --system --gid 1001 nodejs && \
 -COPY --from=builder /app/public ./public
 +COPY --from=builder --chown=nextjs:nodejs /app/public ./public
@@ -3369,7 +3371,7 @@ index 0000000000000000000000000000000000000000..574578a7521a85cfacb2eeb9d0890f65
 +  await expect.poll(() => proposalReviewed).toBe(true);
 +});
 diff --git a/server/dashboard/package.json b/server/dashboard/package.json
-index 7d1b864328bf33549276a21279abebe622c73a0a..186f73e29206b85edc0c625352760b676c56b9e2 100644
+index 7d1b864328bf33549276a21279abebe622c73a0a..49075d96bbadb9046bdd5a3e68463c63364776da 100644
 --- a/server/dashboard/package.json
 +++ b/server/dashboard/package.json
 @@ -12 +12,2 @@
@@ -3377,7 +3379,7 @@ index 7d1b864328bf33549276a21279abebe622c73a0a..186f73e29206b85edc0c625352760b67
 +    "typecheck": "tsc --noEmit",
 +    "test:e2e": "playwright test"
 @@ -67,0 +69 @@
-+    "@playwright/test": "1.55.0",
++    "@playwright/test": "1.55.1",
 diff --git a/server/dashboard/playwright.config.ts b/server/dashboard/playwright.config.ts
 new file mode 100644
 index 0000000000000000000000000000000000000000..d2199a30dbbd2100757d9464f6675018f325d595
@@ -3408,7 +3410,7 @@ index 0000000000000000000000000000000000000000..d2199a30dbbd2100757d9464f6675018
 +  },
 +});
 diff --git a/server/dashboard/pnpm-lock.yaml b/server/dashboard/pnpm-lock.yaml
-index 598f1df970e8502c39d8996a1839cdcfba5a08a2..49624657d24cf203556d775673eaa03a04e9cad1 100644
+index 598f1df970e8502c39d8996a1839cdcfba5a08a2..c51e2293488efe4fe0fc450ce0602a031cf8f9ed 100644
 --- a/server/dashboard/pnpm-lock.yaml
 +++ b/server/dashboard/pnpm-lock.yaml
 @@ -1 +1 @@
@@ -3512,14 +3514,17 @@ index 598f1df970e8502c39d8996a1839cdcfba5a08a2..49624657d24cf203556d775673eaa03a
 @@ -94 +95 @@ importers:
 -      '@tanstack/react-table':
 +      "@tanstack/react-table":
+@@ -99 +100 @@ importers:
+-        version: 1.18.1
++        version: 1.18.1(debug@4.4.3(supports-color@7.2.0))(supports-color@7.2.0)
 @@ -123 +124 @@ importers:
 -        version: 15.5.21(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
-+        version: 15.5.21(@playwright/test@1.55.0)(@types/node@22.5.4)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
++        version: 15.5.21(@playwright/test@1.55.1)(@types/node@22.5.4)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
 @@ -176 +177,4 @@ importers:
 -      '@tailwindcss/typography':
 +      "@playwright/test":
-+        specifier: 1.55.0
-+        version: 1.55.0
++        specifier: 1.55.1
++        version: 1.55.1
 +      "@tailwindcss/typography":
 @@ -179 +183 @@ importers:
 -      '@types/lodash':
@@ -3542,6 +3547,12 @@ index 598f1df970e8502c39d8996a1839cdcfba5a08a2..49624657d24cf203556d775673eaa03a
 @@ -197 +201 @@ importers:
 -      '@types/uuid':
 +      "@types/uuid":
+@@ -205 +209 @@ importers:
+-        version: 8.57.1
++        version: 8.57.1(supports-color@7.2.0)
+@@ -208 +212 @@ importers:
+-        version: 15.5.18(eslint@8.57.1)(typescript@5.9.3)
++        version: 15.5.18(eslint@8.57.1(supports-color@7.2.0))(supports-color@7.2.0)(typescript@5.9.3)
 @@ -210 +214 @@ importers:
 -        specifier: '>=8.5.18 <9.0.0'
 +        specifier: ">=8.5.18 <9.0.0"
@@ -4171,10 +4182,10 @@ index 598f1df970e8502c39d8996a1839cdcfba5a08a2..49624657d24cf203556d775673eaa03a
 +      }
 +    engines: { node: ">=12.4.0" }
 +
-+  "@playwright/test@1.55.0":
++  "@playwright/test@1.55.1":
 +    resolution:
 +      {
-+        integrity: sha512-04IXzPwHrW69XusN/SIdDdKZBzMfOT9UNT/YiJit/xpy2VuAoB8NHc8Aplb96zsWDddLnbkPL3TsmrS04ZU2xQ==,
++        integrity: sha512-IVAh/nOJaw6W9g+RJVlIQJ6gSiER+ae6mKQ5CX1bERzQgbC1VSeBlwdvczT7pxb0GWiyrxH4TGKbMfDb4Sq/ig==,
 +      }
 +    engines: { node: ">=18" }
 +    hasBin: true
@@ -7748,18 +7759,18 @@ index 598f1df970e8502c39d8996a1839cdcfba5a08a2..49624657d24cf203556d775673eaa03a
 +      }
 +    engines: { node: ">= 6" }
 +
-+  playwright-core@1.55.0:
++  playwright-core@1.55.1:
 +    resolution:
 +      {
-+        integrity: sha512-GvZs4vU3U5ro2nZpeiwyb0zuFaqb9sUiAJuyrWpcGouD8y9/HLgGbNRjIph7zU9D3hnPaisMl9zG9CgFi/biIg==,
++        integrity: sha512-Z6Mh9mkwX+zxSlHqdr5AOcJnfp+xUWLCt9uKV18fhzA8eyxUd8NUWzAjxUh55RZKSYwDGX0cfaySdhZJGMoJ+w==,
 +      }
 +    engines: { node: ">=18" }
 +    hasBin: true
 +
-+  playwright@1.55.0:
++  playwright@1.55.1:
 +    resolution:
 +      {
-+        integrity: sha512-sdCWStblvV1YU909Xqx0DhOjPZE4/5lJsIS84IfN9dAZfcl/CIZ5O8l3o0j7hPMjDvqoTF8ZUcc+i/GL5erstA==,
++        integrity: sha512-cJW4Xd/G3v5ovXtJJ52MAOclqeac9S/aGGgRzLabuF8TnIb6xHvMzKIa6JmrRzUkeXJgfL1MhukP0NK6l39h3A==,
 +      }
 +    engines: { node: ">=18" }
 +    hasBin: true
@@ -8776,12 +8787,12 @@ index 598f1df970e8502c39d8996a1839cdcfba5a08a2..49624657d24cf203556d775673eaa03a
 +      }
 @@ -3110,0 +4920 @@ snapshots:
 +  "@alloc/quick-lru@5.2.0": {}
-@@ -3112 +4922 @@ snapshots:
+@@ -3112,3 +4922 @@ snapshots:
 -  '@alloc/quick-lru@5.2.0': {}
-+  "@babel/runtime@7.29.7": {}
-@@ -3114,3 +4924 @@ snapshots:
--  '@babel/runtime@7.29.7': {}
 -
+-  '@babel/runtime@7.29.7': {}
++  "@babel/runtime@7.29.7": {}
+@@ -3116 +4924 @@ snapshots:
 -  '@emnapi/core@1.10.0':
 +  "@emnapi/core@1.10.0":
 @@ -3118 +4926 @@ snapshots:
@@ -8798,13 +8809,19 @@ index 598f1df970e8502c39d8996a1839cdcfba5a08a2..49624657d24cf203556d775673eaa03a
 +  "@emnapi/wasi-threads@1.2.1":
 @@ -3137 +4945 @@ snapshots:
 -  '@eslint-community/eslint-utils@4.9.1(eslint@8.57.1)':
-+  "@eslint-community/eslint-utils@4.9.1(eslint@8.57.1)":
++  "@eslint-community/eslint-utils@4.9.1(eslint@8.57.1(supports-color@7.2.0))":
+@@ -3139 +4947 @@ snapshots:
+-      eslint: 8.57.1
++      eslint: 8.57.1(supports-color@7.2.0)
 @@ -3142 +4950 @@ snapshots:
 -  '@eslint-community/regexpp@4.12.2': {}
 +  "@eslint-community/regexpp@4.12.2": {}
 @@ -3144 +4952 @@ snapshots:
 -  '@eslint/eslintrc@2.1.4':
-+  "@eslint/eslintrc@2.1.4":
++  "@eslint/eslintrc@2.1.4(supports-color@7.2.0)":
+@@ -3147 +4955 @@ snapshots:
+-      debug: 4.4.3
++      debug: 4.4.3(supports-color@7.2.0)
 @@ -3158 +4966 @@ snapshots:
 -  '@eslint/js@8.57.1': {}
 +  "@eslint/js@8.57.1": {}
@@ -8836,10 +8853,12 @@ index 598f1df970e8502c39d8996a1839cdcfba5a08a2..49624657d24cf203556d775673eaa03a
 +  "@hookform/resolvers@3.10.0(react-hook-form@7.78.0(react@19.2.7))":
 @@ -3181 +4989 @@ snapshots:
 -  '@humanwhocodes/config-array@0.13.0':
-+  "@humanwhocodes/config-array@0.13.0":
-@@ -3183 +4991 @@ snapshots:
++  "@humanwhocodes/config-array@0.13.0(supports-color@7.2.0)":
+@@ -3183,2 +4991,2 @@ snapshots:
 -      '@humanwhocodes/object-schema': 2.0.3
+-      debug: 4.4.3
 +      "@humanwhocodes/object-schema": 2.0.3
++      debug: 4.4.3(supports-color@7.2.0)
 @@ -3189 +4997 @@ snapshots:
 -  '@humanwhocodes/module-importer@1.0.1': {}
 +  "@humanwhocodes/module-importer@1.0.1": {}
@@ -8858,46 +8877,46 @@ index 598f1df970e8502c39d8996a1839cdcfba5a08a2..49624657d24cf203556d775673eaa03a
 @@ -3201 +5009 @@ snapshots:
 -  '@img/sharp-darwin-x64@0.34.5':
 +  "@img/sharp-darwin-x64@0.35.3":
-@@ -3203 +5011,6 @@ snapshots:
+@@ -3203 +5011 @@ snapshots:
 -      '@img/sharp-libvips-darwin-x64': 1.2.4
 +      "@img/sharp-libvips-darwin-x64": 1.3.2
-+    optional: true
-+
+@@ -3206 +5014,3 @@ snapshots:
+-  '@img/sharp-libvips-darwin-arm64@1.2.4':
 +  "@img/sharp-freebsd-wasm32@0.35.3":
 +    dependencies:
 +      "@img/sharp-wasm32": 0.35.3
-@@ -3206 +5019 @@ snapshots:
--  '@img/sharp-libvips-darwin-arm64@1.2.4':
-+  "@img/sharp-libvips-darwin-arm64@1.3.2":
-@@ -3209 +5022 @@ snapshots:
+@@ -3209 +5019 @@ snapshots:
 -  '@img/sharp-libvips-darwin-x64@1.2.4':
-+  "@img/sharp-libvips-darwin-x64@1.3.2":
-@@ -3212 +5025 @@ snapshots:
++  "@img/sharp-libvips-darwin-arm64@1.3.2":
+@@ -3212 +5022 @@ snapshots:
 -  '@img/sharp-libvips-linux-arm64@1.2.4':
-+  "@img/sharp-libvips-linux-arm64@1.3.2":
-@@ -3215 +5028 @@ snapshots:
++  "@img/sharp-libvips-darwin-x64@1.3.2":
+@@ -3215 +5025 @@ snapshots:
 -  '@img/sharp-libvips-linux-arm@1.2.4':
-+  "@img/sharp-libvips-linux-arm@1.3.2":
-@@ -3218 +5031 @@ snapshots:
++  "@img/sharp-libvips-linux-arm64@1.3.2":
+@@ -3218 +5028 @@ snapshots:
 -  '@img/sharp-libvips-linux-ppc64@1.2.4':
-+  "@img/sharp-libvips-linux-ppc64@1.3.2":
-@@ -3221 +5034 @@ snapshots:
++  "@img/sharp-libvips-linux-arm@1.3.2":
+@@ -3221 +5031 @@ snapshots:
 -  '@img/sharp-libvips-linux-riscv64@1.2.4':
-+  "@img/sharp-libvips-linux-riscv64@1.3.2":
-@@ -3224 +5037 @@ snapshots:
++  "@img/sharp-libvips-linux-ppc64@1.3.2":
+@@ -3224 +5034 @@ snapshots:
 -  '@img/sharp-libvips-linux-s390x@1.2.4':
-+  "@img/sharp-libvips-linux-s390x@1.3.2":
-@@ -3227 +5040 @@ snapshots:
++  "@img/sharp-libvips-linux-riscv64@1.3.2":
+@@ -3227 +5037 @@ snapshots:
 -  '@img/sharp-libvips-linux-x64@1.2.4':
-+  "@img/sharp-libvips-linux-x64@1.3.2":
-@@ -3230 +5043 @@ snapshots:
++  "@img/sharp-libvips-linux-s390x@1.3.2":
+@@ -3230 +5040 @@ snapshots:
 -  '@img/sharp-libvips-linuxmusl-arm64@1.2.4':
-+  "@img/sharp-libvips-linuxmusl-arm64@1.3.2":
-@@ -3233 +5046 @@ snapshots:
++  "@img/sharp-libvips-linux-x64@1.3.2":
+@@ -3233 +5043 @@ snapshots:
 -  '@img/sharp-libvips-linuxmusl-x64@1.2.4':
-+  "@img/sharp-libvips-linuxmusl-x64@1.3.2":
-@@ -3236 +5049 @@ snapshots:
++  "@img/sharp-libvips-linuxmusl-arm64@1.3.2":
+@@ -3236 +5046,4 @@ snapshots:
 -  '@img/sharp-linux-arm64@0.34.5':
++  "@img/sharp-libvips-linuxmusl-x64@1.3.2":
++    optional: true
++
 +  "@img/sharp-linux-arm64@0.35.3":
 @@ -3238 +5051 @@ snapshots:
 -      '@img/sharp-libvips-linux-arm64': 1.2.4
@@ -9045,9 +9064,9 @@ index 598f1df970e8502c39d8996a1839cdcfba5a08a2..49624657d24cf203556d775673eaa03a
 -  '@nolyfill/is-core-module@1.0.39': {}
 +  "@nolyfill/is-core-module@1.0.39": {}
 +
-+  "@playwright/test@1.55.0":
++  "@playwright/test@1.55.1":
 +    dependencies:
-+      playwright: 1.55.0
++      playwright: 1.55.1
 @@ -3355 +5177 @@ snapshots:
 -  '@radix-ui/number@1.1.2': {}
 +  "@radix-ui/number@1.1.2": {}
@@ -10051,40 +10070,48 @@ index 598f1df970e8502c39d8996a1839cdcfba5a08a2..49624657d24cf203556d775673eaa03a
 +  "@types/uuid@9.0.8": {}
 @@ -4042 +5864 @@ snapshots:
 -  '@typescript-eslint/eslint-plugin@8.61.0(@typescript-eslint/parser@8.61.0(eslint@8.57.1)(typescript@5.9.3))(eslint@8.57.1)(typescript@5.9.3)':
-+  "@typescript-eslint/eslint-plugin@8.61.0(@typescript-eslint/parser@8.61.0(eslint@8.57.1)(typescript@5.9.3))(eslint@8.57.1)(typescript@5.9.3)":
-@@ -4044,6 +5866,6 @@ snapshots:
++  "@typescript-eslint/eslint-plugin@8.61.0(@typescript-eslint/parser@8.61.0(eslint@8.57.1(supports-color@7.2.0))(supports-color@7.2.0)(typescript@5.9.3))(eslint@8.57.1(supports-color@7.2.0))(supports-color@7.2.0)(typescript@5.9.3)":
+@@ -4044,7 +5866,7 @@ snapshots:
 -      '@eslint-community/regexpp': 4.12.2
 -      '@typescript-eslint/parser': 8.61.0(eslint@8.57.1)(typescript@5.9.3)
 -      '@typescript-eslint/scope-manager': 8.61.0
 -      '@typescript-eslint/type-utils': 8.61.0(eslint@8.57.1)(typescript@5.9.3)
 -      '@typescript-eslint/utils': 8.61.0(eslint@8.57.1)(typescript@5.9.3)
 -      '@typescript-eslint/visitor-keys': 8.61.0
+-      eslint: 8.57.1
 +      "@eslint-community/regexpp": 4.12.2
-+      "@typescript-eslint/parser": 8.61.0(eslint@8.57.1)(typescript@5.9.3)
++      "@typescript-eslint/parser": 8.61.0(eslint@8.57.1(supports-color@7.2.0))(supports-color@7.2.0)(typescript@5.9.3)
 +      "@typescript-eslint/scope-manager": 8.61.0
-+      "@typescript-eslint/type-utils": 8.61.0(eslint@8.57.1)(typescript@5.9.3)
-+      "@typescript-eslint/utils": 8.61.0(eslint@8.57.1)(typescript@5.9.3)
++      "@typescript-eslint/type-utils": 8.61.0(eslint@8.57.1(supports-color@7.2.0))(supports-color@7.2.0)(typescript@5.9.3)
++      "@typescript-eslint/utils": 8.61.0(eslint@8.57.1(supports-color@7.2.0))(supports-color@7.2.0)(typescript@5.9.3)
 +      "@typescript-eslint/visitor-keys": 8.61.0
++      eslint: 8.57.1(supports-color@7.2.0)
 @@ -4058 +5880 @@ snapshots:
 -  '@typescript-eslint/parser@8.61.0(eslint@8.57.1)(typescript@5.9.3)':
-+  "@typescript-eslint/parser@8.61.0(eslint@8.57.1)(typescript@5.9.3)":
-@@ -4060,4 +5882,4 @@ snapshots:
++  "@typescript-eslint/parser@8.61.0(eslint@8.57.1(supports-color@7.2.0))(supports-color@7.2.0)(typescript@5.9.3)":
+@@ -4060,6 +5882,6 @@ snapshots:
 -      '@typescript-eslint/scope-manager': 8.61.0
 -      '@typescript-eslint/types': 8.61.0
 -      '@typescript-eslint/typescript-estree': 8.61.0(typescript@5.9.3)
 -      '@typescript-eslint/visitor-keys': 8.61.0
+-      debug: 4.4.3
+-      eslint: 8.57.1
 +      "@typescript-eslint/scope-manager": 8.61.0
 +      "@typescript-eslint/types": 8.61.0
-+      "@typescript-eslint/typescript-estree": 8.61.0(typescript@5.9.3)
++      "@typescript-eslint/typescript-estree": 8.61.0(supports-color@7.2.0)(typescript@5.9.3)
 +      "@typescript-eslint/visitor-keys": 8.61.0
++      debug: 4.4.3(supports-color@7.2.0)
++      eslint: 8.57.1(supports-color@7.2.0)
 @@ -4070 +5892 @@ snapshots:
 -  '@typescript-eslint/project-service@8.61.0(typescript@5.9.3)':
-+  "@typescript-eslint/project-service@8.61.0(typescript@5.9.3)":
-@@ -4072,2 +5894,2 @@ snapshots:
++  "@typescript-eslint/project-service@8.61.0(supports-color@7.2.0)(typescript@5.9.3)":
+@@ -4072,3 +5894,3 @@ snapshots:
 -      '@typescript-eslint/tsconfig-utils': 8.61.0(typescript@5.9.3)
 -      '@typescript-eslint/types': 8.61.0
+-      debug: 4.4.3
 +      "@typescript-eslint/tsconfig-utils": 8.61.0(typescript@5.9.3)
 +      "@typescript-eslint/types": 8.61.0
++      debug: 4.4.3(supports-color@7.2.0)
 @@ -4079 +5901 @@ snapshots:
 -  '@typescript-eslint/scope-manager@8.61.0':
 +  "@typescript-eslint/scope-manager@8.61.0":
@@ -10098,41 +10125,49 @@ index 598f1df970e8502c39d8996a1839cdcfba5a08a2..49624657d24cf203556d775673eaa03a
 +  "@typescript-eslint/tsconfig-utils@8.61.0(typescript@5.9.3)":
 @@ -4088 +5910 @@ snapshots:
 -  '@typescript-eslint/type-utils@8.61.0(eslint@8.57.1)(typescript@5.9.3)':
-+  "@typescript-eslint/type-utils@8.61.0(eslint@8.57.1)(typescript@5.9.3)":
-@@ -4090,3 +5912,3 @@ snapshots:
++  "@typescript-eslint/type-utils@8.61.0(eslint@8.57.1(supports-color@7.2.0))(supports-color@7.2.0)(typescript@5.9.3)":
+@@ -4090,5 +5912,5 @@ snapshots:
 -      '@typescript-eslint/types': 8.61.0
 -      '@typescript-eslint/typescript-estree': 8.61.0(typescript@5.9.3)
 -      '@typescript-eslint/utils': 8.61.0(eslint@8.57.1)(typescript@5.9.3)
+-      debug: 4.4.3
+-      eslint: 8.57.1
 +      "@typescript-eslint/types": 8.61.0
-+      "@typescript-eslint/typescript-estree": 8.61.0(typescript@5.9.3)
-+      "@typescript-eslint/utils": 8.61.0(eslint@8.57.1)(typescript@5.9.3)
++      "@typescript-eslint/typescript-estree": 8.61.0(supports-color@7.2.0)(typescript@5.9.3)
++      "@typescript-eslint/utils": 8.61.0(eslint@8.57.1(supports-color@7.2.0))(supports-color@7.2.0)(typescript@5.9.3)
++      debug: 4.4.3(supports-color@7.2.0)
++      eslint: 8.57.1(supports-color@7.2.0)
 @@ -4100 +5922 @@ snapshots:
 -  '@typescript-eslint/types@8.61.0': {}
 +  "@typescript-eslint/types@8.61.0": {}
 @@ -4102 +5924 @@ snapshots:
 -  '@typescript-eslint/typescript-estree@8.61.0(typescript@5.9.3)':
-+  "@typescript-eslint/typescript-estree@8.61.0(typescript@5.9.3)":
-@@ -4104,4 +5926,4 @@ snapshots:
++  "@typescript-eslint/typescript-estree@8.61.0(supports-color@7.2.0)(typescript@5.9.3)":
+@@ -4104,5 +5926,5 @@ snapshots:
 -      '@typescript-eslint/project-service': 8.61.0(typescript@5.9.3)
 -      '@typescript-eslint/tsconfig-utils': 8.61.0(typescript@5.9.3)
 -      '@typescript-eslint/types': 8.61.0
 -      '@typescript-eslint/visitor-keys': 8.61.0
-+      "@typescript-eslint/project-service": 8.61.0(typescript@5.9.3)
+-      debug: 4.4.3
++      "@typescript-eslint/project-service": 8.61.0(supports-color@7.2.0)(typescript@5.9.3)
 +      "@typescript-eslint/tsconfig-utils": 8.61.0(typescript@5.9.3)
 +      "@typescript-eslint/types": 8.61.0
 +      "@typescript-eslint/visitor-keys": 8.61.0
++      debug: 4.4.3(supports-color@7.2.0)
 @@ -4117 +5939 @@ snapshots:
 -  '@typescript-eslint/utils@8.61.0(eslint@8.57.1)(typescript@5.9.3)':
-+  "@typescript-eslint/utils@8.61.0(eslint@8.57.1)(typescript@5.9.3)":
-@@ -4119,4 +5941,4 @@ snapshots:
++  "@typescript-eslint/utils@8.61.0(eslint@8.57.1(supports-color@7.2.0))(supports-color@7.2.0)(typescript@5.9.3)":
+@@ -4119,5 +5941,5 @@ snapshots:
 -      '@eslint-community/eslint-utils': 4.9.1(eslint@8.57.1)
 -      '@typescript-eslint/scope-manager': 8.61.0
 -      '@typescript-eslint/types': 8.61.0
 -      '@typescript-eslint/typescript-estree': 8.61.0(typescript@5.9.3)
-+      "@eslint-community/eslint-utils": 4.9.1(eslint@8.57.1)
+-      eslint: 8.57.1
++      "@eslint-community/eslint-utils": 4.9.1(eslint@8.57.1(supports-color@7.2.0))
 +      "@typescript-eslint/scope-manager": 8.61.0
 +      "@typescript-eslint/types": 8.61.0
-+      "@typescript-eslint/typescript-estree": 8.61.0(typescript@5.9.3)
++      "@typescript-eslint/typescript-estree": 8.61.0(supports-color@7.2.0)(typescript@5.9.3)
++      eslint: 8.57.1(supports-color@7.2.0)
 @@ -4128 +5950 @@ snapshots:
 -  '@typescript-eslint/visitor-keys@8.61.0':
 +  "@typescript-eslint/visitor-keys@8.61.0":
@@ -10215,6 +10250,21 @@ index 598f1df970e8502c39d8996a1839cdcfba5a08a2..49624657d24cf203556d775673eaa03a
 @@ -4202 +6024 @@ snapshots:
 -  '@unrs/resolver-binding-win32-x64-msvc@1.12.2':
 +  "@unrs/resolver-binding-win32-x64-msvc@1.12.2":
+@@ -4211 +6033 @@ snapshots:
+-  agent-base@6.0.2:
++  agent-base@6.0.2(supports-color@7.2.0):
+@@ -4213 +6035 @@ snapshots:
+-      debug: 4.4.3
++      debug: 4.4.3(supports-color@7.2.0)
+@@ -4335 +6157 @@ snapshots:
+-  axios@1.18.1:
++  axios@1.18.1(debug@4.4.3(supports-color@7.2.0))(supports-color@7.2.0):
+@@ -4337 +6159 @@ snapshots:
+-      follow-redirects: 1.16.0
++      follow-redirects: 1.16.0(debug@4.4.3(supports-color@7.2.0))
+@@ -4339 +6161 @@ snapshots:
+-      https-proxy-agent: 5.0.1
++      https-proxy-agent: 5.0.1(supports-color@7.2.0)
 @@ -4432,4 +6254,4 @@ snapshots:
 -      '@radix-ui/react-compose-refs': 1.1.3(@types/react@19.2.17)(react@19.2.7)
 -      '@radix-ui/react-dialog': 1.1.16(@types/react-dom@19.2.3(@types/react@19.2.17))(@types/react@19.2.17)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
@@ -10229,31 +10279,123 @@ index 598f1df970e8502c39d8996a1839cdcfba5a08a2..49624657d24cf203556d775673eaa03a
 -      - '@types/react-dom'
 +      - "@types/react"
 +      - "@types/react-dom"
-@@ -4577 +6399 @@ snapshots:
+@@ -4532 +6354 @@ snapshots:
+-  debug@3.2.7:
++  debug@3.2.7(supports-color@7.2.0):
+@@ -4534,0 +6357,2 @@ snapshots:
++    optionalDependencies:
++      supports-color: 7.2.0
+@@ -4536 +6360 @@ snapshots:
+-  debug@4.4.3:
++  debug@4.4.3(supports-color@7.2.0):
+@@ -4538,0 +6363,2 @@ snapshots:
++    optionalDependencies:
++      supports-color: 7.2.0
+@@ -4577 +6403 @@ snapshots:
 -      '@babel/runtime': 7.29.7
 +      "@babel/runtime": 7.29.7
-@@ -4697,4 +6519,4 @@ snapshots:
+@@ -4695,13 +6521,13 @@ snapshots:
+-  eslint-config-next@15.5.18(eslint@8.57.1)(typescript@5.9.3):
+-    dependencies:
 -      '@next/eslint-plugin-next': 15.5.18
 -      '@rushstack/eslint-patch': 1.16.1
 -      '@typescript-eslint/eslint-plugin': 8.61.0(@typescript-eslint/parser@8.61.0(eslint@8.57.1)(typescript@5.9.3))(eslint@8.57.1)(typescript@5.9.3)
 -      '@typescript-eslint/parser': 8.61.0(eslint@8.57.1)(typescript@5.9.3)
+-      eslint: 8.57.1
+-      eslint-import-resolver-node: 0.3.10
+-      eslint-import-resolver-typescript: 3.10.1(eslint-plugin-import@2.32.0)(eslint@8.57.1)
+-      eslint-plugin-import: 2.32.0(@typescript-eslint/parser@8.61.0(eslint@8.57.1)(typescript@5.9.3))(eslint-import-resolver-typescript@3.10.1)(eslint@8.57.1)
+-      eslint-plugin-jsx-a11y: 6.10.2(eslint@8.57.1)
+-      eslint-plugin-react: 7.37.5(eslint@8.57.1)
+-      eslint-plugin-react-hooks: 5.2.0(eslint@8.57.1)
++  eslint-config-next@15.5.18(eslint@8.57.1(supports-color@7.2.0))(supports-color@7.2.0)(typescript@5.9.3):
++    dependencies:
 +      "@next/eslint-plugin-next": 15.5.18
 +      "@rushstack/eslint-patch": 1.16.1
-+      "@typescript-eslint/eslint-plugin": 8.61.0(@typescript-eslint/parser@8.61.0(eslint@8.57.1)(typescript@5.9.3))(eslint@8.57.1)(typescript@5.9.3)
-+      "@typescript-eslint/parser": 8.61.0(eslint@8.57.1)(typescript@5.9.3)
-@@ -4725 +6547 @@ snapshots:
++      "@typescript-eslint/eslint-plugin": 8.61.0(@typescript-eslint/parser@8.61.0(eslint@8.57.1(supports-color@7.2.0))(supports-color@7.2.0)(typescript@5.9.3))(eslint@8.57.1(supports-color@7.2.0))(supports-color@7.2.0)(typescript@5.9.3)
++      "@typescript-eslint/parser": 8.61.0(eslint@8.57.1(supports-color@7.2.0))(supports-color@7.2.0)(typescript@5.9.3)
++      eslint: 8.57.1(supports-color@7.2.0)
++      eslint-import-resolver-node: 0.3.10(supports-color@7.2.0)
++      eslint-import-resolver-typescript: 3.10.1(eslint-plugin-import@2.32.0)(eslint@8.57.1(supports-color@7.2.0))(supports-color@7.2.0)
++      eslint-plugin-import: 2.32.0(@typescript-eslint/parser@8.61.0(eslint@8.57.1(supports-color@7.2.0))(supports-color@7.2.0)(typescript@5.9.3))(eslint-import-resolver-typescript@3.10.1)(eslint@8.57.1(supports-color@7.2.0))(supports-color@7.2.0)
++      eslint-plugin-jsx-a11y: 6.10.2(eslint@8.57.1(supports-color@7.2.0))
++      eslint-plugin-react: 7.37.5(eslint@8.57.1(supports-color@7.2.0))
++      eslint-plugin-react-hooks: 5.2.0(eslint@8.57.1(supports-color@7.2.0))
+@@ -4715 +6541 @@ snapshots:
+-  eslint-import-resolver-node@0.3.10:
++  eslint-import-resolver-node@0.3.10(supports-color@7.2.0):
+@@ -4717 +6543 @@ snapshots:
+-      debug: 3.2.7
++      debug: 3.2.7(supports-color@7.2.0)
+@@ -4723 +6549 @@ snapshots:
+-  eslint-import-resolver-typescript@3.10.1(eslint-plugin-import@2.32.0)(eslint@8.57.1):
++  eslint-import-resolver-typescript@3.10.1(eslint-plugin-import@2.32.0)(eslint@8.57.1(supports-color@7.2.0))(supports-color@7.2.0):
+@@ -4725,3 +6551,3 @@ snapshots:
 -      '@nolyfill/is-core-module': 1.0.39
+-      debug: 4.4.3
+-      eslint: 8.57.1
 +      "@nolyfill/is-core-module": 1.0.39
-@@ -4742 +6564 @@ snapshots:
++      debug: 4.4.3(supports-color@7.2.0)
++      eslint: 8.57.1(supports-color@7.2.0)
+@@ -4734 +6560 @@ snapshots:
+-      eslint-plugin-import: 2.32.0(@typescript-eslint/parser@8.61.0(eslint@8.57.1)(typescript@5.9.3))(eslint-import-resolver-typescript@3.10.1)(eslint@8.57.1)
++      eslint-plugin-import: 2.32.0(@typescript-eslint/parser@8.61.0(eslint@8.57.1(supports-color@7.2.0))(supports-color@7.2.0)(typescript@5.9.3))(eslint-import-resolver-typescript@3.10.1)(eslint@8.57.1(supports-color@7.2.0))(supports-color@7.2.0)
+@@ -4738 +6564 @@ snapshots:
+-  eslint-module-utils@2.13.0(@typescript-eslint/parser@8.61.0(eslint@8.57.1)(typescript@5.9.3))(eslint-import-resolver-node@0.3.10)(eslint-import-resolver-typescript@3.10.1)(eslint@8.57.1):
++  eslint-module-utils@2.13.0(@typescript-eslint/parser@8.61.0(eslint@8.57.1(supports-color@7.2.0))(supports-color@7.2.0)(typescript@5.9.3))(eslint-import-resolver-node@0.3.10(supports-color@7.2.0))(eslint-import-resolver-typescript@3.10.1)(eslint@8.57.1(supports-color@7.2.0))(supports-color@7.2.0):
+@@ -4740 +6566 @@ snapshots:
+-      debug: 3.2.7
++      debug: 3.2.7(supports-color@7.2.0)
+@@ -4742,4 +6568,4 @@ snapshots:
 -      '@typescript-eslint/parser': 8.61.0(eslint@8.57.1)(typescript@5.9.3)
-+      "@typescript-eslint/parser": 8.61.0(eslint@8.57.1)(typescript@5.9.3)
-@@ -4751 +6573 @@ snapshots:
+-      eslint: 8.57.1
+-      eslint-import-resolver-node: 0.3.10
+-      eslint-import-resolver-typescript: 3.10.1(eslint-plugin-import@2.32.0)(eslint@8.57.1)
++      "@typescript-eslint/parser": 8.61.0(eslint@8.57.1(supports-color@7.2.0))(supports-color@7.2.0)(typescript@5.9.3)
++      eslint: 8.57.1(supports-color@7.2.0)
++      eslint-import-resolver-node: 0.3.10(supports-color@7.2.0)
++      eslint-import-resolver-typescript: 3.10.1(eslint-plugin-import@2.32.0)(eslint@8.57.1(supports-color@7.2.0))(supports-color@7.2.0)
+@@ -4749 +6575 @@ snapshots:
+-  eslint-plugin-import@2.32.0(@typescript-eslint/parser@8.61.0(eslint@8.57.1)(typescript@5.9.3))(eslint-import-resolver-typescript@3.10.1)(eslint@8.57.1):
++  eslint-plugin-import@2.32.0(@typescript-eslint/parser@8.61.0(eslint@8.57.1(supports-color@7.2.0))(supports-color@7.2.0)(typescript@5.9.3))(eslint-import-resolver-typescript@3.10.1)(eslint@8.57.1(supports-color@7.2.0))(supports-color@7.2.0):
+@@ -4751 +6577 @@ snapshots:
 -      '@rtsao/scc': 1.1.0
 +      "@rtsao/scc": 1.1.0
-@@ -4772 +6594 @@ snapshots:
+@@ -4756 +6582 @@ snapshots:
+-      debug: 3.2.7
++      debug: 3.2.7(supports-color@7.2.0)
+@@ -4758,3 +6584,3 @@ snapshots:
+-      eslint: 8.57.1
+-      eslint-import-resolver-node: 0.3.10
+-      eslint-module-utils: 2.13.0(@typescript-eslint/parser@8.61.0(eslint@8.57.1)(typescript@5.9.3))(eslint-import-resolver-node@0.3.10)(eslint-import-resolver-typescript@3.10.1)(eslint@8.57.1)
++      eslint: 8.57.1(supports-color@7.2.0)
++      eslint-import-resolver-node: 0.3.10(supports-color@7.2.0)
++      eslint-module-utils: 2.13.0(@typescript-eslint/parser@8.61.0(eslint@8.57.1(supports-color@7.2.0))(supports-color@7.2.0)(typescript@5.9.3))(eslint-import-resolver-node@0.3.10(supports-color@7.2.0))(eslint-import-resolver-typescript@3.10.1)(eslint@8.57.1(supports-color@7.2.0))(supports-color@7.2.0)
+@@ -4772 +6598 @@ snapshots:
 -      '@typescript-eslint/parser': 8.61.0(eslint@8.57.1)(typescript@5.9.3)
-+      "@typescript-eslint/parser": 8.61.0(eslint@8.57.1)(typescript@5.9.3)
-@@ -4834,8 +6656,8 @@ snapshots:
++      "@typescript-eslint/parser": 8.61.0(eslint@8.57.1(supports-color@7.2.0))(supports-color@7.2.0)(typescript@5.9.3)
+@@ -4778 +6604 @@ snapshots:
+-  eslint-plugin-jsx-a11y@6.10.2(eslint@8.57.1):
++  eslint-plugin-jsx-a11y@6.10.2(eslint@8.57.1(supports-color@7.2.0)):
+@@ -4788 +6614 @@ snapshots:
+-      eslint: 8.57.1
++      eslint: 8.57.1(supports-color@7.2.0)
+@@ -4797 +6623 @@ snapshots:
+-  eslint-plugin-react-hooks@5.2.0(eslint@8.57.1):
++  eslint-plugin-react-hooks@5.2.0(eslint@8.57.1(supports-color@7.2.0)):
+@@ -4799 +6625 @@ snapshots:
+-      eslint: 8.57.1
++      eslint: 8.57.1(supports-color@7.2.0)
+@@ -4801 +6627 @@ snapshots:
+-  eslint-plugin-react@7.37.5(eslint@8.57.1):
++  eslint-plugin-react@7.37.5(eslint@8.57.1(supports-color@7.2.0)):
+@@ -4809 +6635 @@ snapshots:
+-      eslint: 8.57.1
++      eslint: 8.57.1(supports-color@7.2.0)
+@@ -4832 +6658 @@ snapshots:
+-  eslint@8.57.1:
++  eslint@8.57.1(supports-color@7.2.0):
+@@ -4834,8 +6660,8 @@ snapshots:
 -      '@eslint-community/eslint-utils': 4.9.1(eslint@8.57.1)
 -      '@eslint-community/regexpp': 4.12.2
 -      '@eslint/eslintrc': 2.1.4
@@ -10262,43 +10404,59 @@ index 598f1df970e8502c39d8996a1839cdcfba5a08a2..49624657d24cf203556d775673eaa03a
 -      '@humanwhocodes/module-importer': 1.0.1
 -      '@nodelib/fs.walk': 1.2.8
 -      '@ungap/structured-clone': 1.3.1
-+      "@eslint-community/eslint-utils": 4.9.1(eslint@8.57.1)
++      "@eslint-community/eslint-utils": 4.9.1(eslint@8.57.1(supports-color@7.2.0))
 +      "@eslint-community/regexpp": 4.12.2
-+      "@eslint/eslintrc": 2.1.4
++      "@eslint/eslintrc": 2.1.4(supports-color@7.2.0)
 +      "@eslint/js": 8.57.1
-+      "@humanwhocodes/config-array": 0.13.0
++      "@humanwhocodes/config-array": 0.13.0(supports-color@7.2.0)
 +      "@humanwhocodes/module-importer": 1.0.1
 +      "@nodelib/fs.walk": 1.2.8
 +      "@ungap/structured-clone": 1.3.1
-@@ -4901,2 +6723,2 @@ snapshots:
+@@ -4845 +6671 @@ snapshots:
+-      debug: 4.4.3
++      debug: 4.4.3(supports-color@7.2.0)
+@@ -4901,2 +6727,2 @@ snapshots:
 -      '@nodelib/fs.stat': 2.0.5
 -      '@nodelib/fs.walk': 1.2.8
 +      "@nodelib/fs.stat": 2.0.5
 +      "@nodelib/fs.walk": 1.2.8
-@@ -4909,2 +6731,2 @@ snapshots:
+@@ -4909,2 +6735,2 @@ snapshots:
 -      '@nodelib/fs.stat': 2.0.5
 -      '@nodelib/fs.walk': 1.2.8
 +      "@nodelib/fs.stat": 2.0.5
 +      "@nodelib/fs.walk": 1.2.8
-@@ -4980,0 +6803,3 @@ snapshots:
+@@ -4952 +6778,3 @@ snapshots:
+-  follow-redirects@1.16.0: {}
++  follow-redirects@1.16.0(debug@4.4.3(supports-color@7.2.0)):
++    optionalDependencies:
++      debug: 4.4.3(supports-color@7.2.0)
+@@ -4980,0 +6809,3 @@ snapshots:
 +  fsevents@2.3.2:
 +    optional: true
 +
-@@ -5085 +6910 @@ snapshots:
+@@ -5085 +6916 @@ snapshots:
 -      '@types/hast': 2.3.10
 +      "@types/hast": 2.3.10
-@@ -5376 +7201 @@ snapshots:
+@@ -5095 +6926 @@ snapshots:
+-  https-proxy-agent@5.0.1:
++  https-proxy-agent@5.0.1(supports-color@7.2.0):
+@@ -5097,2 +6928,2 @@ snapshots:
+-      agent-base: 6.0.2
+-      debug: 4.4.3
++      agent-base: 6.0.2(supports-color@7.2.0)
++      debug: 4.4.3(supports-color@7.2.0)
+@@ -5376 +7207 @@ snapshots:
 -  nanoid@3.3.16: {}
 +  nanoid@3.3.18: {}
-@@ -5387 +7212 @@ snapshots:
+@@ -5387 +7218 @@ snapshots:
 -  next@15.5.21(react-dom@19.2.7(react@19.2.7))(react@19.2.7):
-+  next@15.5.21(@playwright/test@1.55.0)(@types/node@22.5.4)(react-dom@19.2.7(react@19.2.7))(react@19.2.7):
-@@ -5389,2 +7214,2 @@ snapshots:
++  next@15.5.21(@playwright/test@1.55.1)(@types/node@22.5.4)(react-dom@19.2.7(react@19.2.7))(react@19.2.7):
+@@ -5389,2 +7220,2 @@ snapshots:
 -      '@next/env': 15.5.21
 -      '@swc/helpers': 0.5.15
 +      "@next/env": 15.5.21
 +      "@swc/helpers": 0.5.15
-@@ -5397,9 +7222,10 @@ snapshots:
+@@ -5397,9 +7228,10 @@ snapshots:
 -      '@next/swc-darwin-arm64': 15.5.21
 -      '@next/swc-darwin-x64': 15.5.21
 -      '@next/swc-linux-arm64-gnu': 15.5.21
@@ -10316,59 +10474,59 @@ index 598f1df970e8502c39d8996a1839cdcfba5a08a2..49624657d24cf203556d775673eaa03a
 +      "@next/swc-linux-x64-musl": 15.5.21
 +      "@next/swc-win32-arm64-msvc": 15.5.21
 +      "@next/swc-win32-x64-msvc": 15.5.21
-+      "@playwright/test": 1.55.0
++      "@playwright/test": 1.55.1
 +      sharp: 0.35.3(@types/node@22.5.4)
-@@ -5407 +7233,2 @@ snapshots:
+@@ -5407 +7239,2 @@ snapshots:
 -      - '@babel/core'
 +      - "@babel/core"
 +      - "@types/node"
-@@ -5522,0 +7350,8 @@ snapshots:
-+  playwright-core@1.55.0: {}
+@@ -5522,0 +7356,8 @@ snapshots:
++  playwright-core@1.55.1: {}
 +
-+  playwright@1.55.0:
++  playwright@1.55.1:
 +    dependencies:
-+      playwright-core: 1.55.0
++      playwright-core: 1.55.1
 +    optionalDependencies:
 +      fsevents: 2.3.2
 +
-@@ -5563 +7398 @@ snapshots:
+@@ -5563 +7404 @@ snapshots:
 -      nanoid: 3.3.16
 +      nanoid: 3.3.18
-@@ -5615 +7450 @@ snapshots:
+@@ -5615 +7456 @@ snapshots:
 -      '@types/use-sync-external-store': 0.0.6
 +      "@types/use-sync-external-store": 0.0.6
-@@ -5619 +7454 @@ snapshots:
+@@ -5619 +7460 @@ snapshots:
 -      '@types/react': 19.2.17
 +      "@types/react": 19.2.17
-@@ -5628 +7463 @@ snapshots:
+@@ -5628 +7469 @@ snapshots:
 -      '@types/react': 19.2.17
 +      "@types/react": 19.2.17
-@@ -5639 +7474 @@ snapshots:
+@@ -5639 +7480 @@ snapshots:
 -      '@types/react': 19.2.17
 +      "@types/react": 19.2.17
-@@ -5655 +7490 @@ snapshots:
+@@ -5655 +7496 @@ snapshots:
 -      '@types/react': 19.2.17
 +      "@types/react": 19.2.17
-@@ -5659 +7494 @@ snapshots:
+@@ -5659 +7500 @@ snapshots:
 -      '@babel/runtime': 7.29.7
 +      "@babel/runtime": 7.29.7
-@@ -5669 +7504 @@ snapshots:
+@@ -5669 +7510 @@ snapshots:
 -      '@babel/runtime': 7.29.7
 +      "@babel/runtime": 7.29.7
-@@ -5791,0 +7627,3 @@ snapshots:
+@@ -5791,0 +7633,3 @@ snapshots:
 +  semver@7.8.5:
 +    optional: true
 +
-@@ -5814 +7652 @@ snapshots:
+@@ -5814 +7658 @@ snapshots:
 -  sharp@0.34.5:
 +  sharp@0.35.3(@types/node@22.5.4):
-@@ -5816 +7654 @@ snapshots:
+@@ -5816 +7660 @@ snapshots:
 -      '@img/colour': 1.1.0
 +      "@img/colour": 1.1.0
-@@ -5818 +7656 @@ snapshots:
+@@ -5818 +7662 @@ snapshots:
 -      semver: 7.8.4
 +      semver: 7.8.5
-@@ -5820,24 +7658,26 @@ snapshots:
+@@ -5820,24 +7664,26 @@ snapshots:
 -      '@img/sharp-darwin-arm64': 0.34.5
 -      '@img/sharp-darwin-x64': 0.34.5
 -      '@img/sharp-libvips-darwin-arm64': 1.2.4
@@ -10419,16 +10577,16 @@ index 598f1df970e8502c39d8996a1839cdcfba5a08a2..49624657d24cf203556d775673eaa03a
 +      "@img/sharp-win32-ia32": 0.35.3
 +      "@img/sharp-win32-x64": 0.35.3
 +      "@types/node": 22.5.4
-@@ -5962 +7802 @@ snapshots:
+@@ -5962 +7808 @@ snapshots:
 -      '@jridgewell/gen-mapping': 0.3.13
 +      "@jridgewell/gen-mapping": 0.3.13
-@@ -5984 +7824 @@ snapshots:
+@@ -5984 +7830 @@ snapshots:
 -      '@alloc/quick-lru': 5.2.0
 +      "@alloc/quick-lru": 5.2.0
-@@ -6041 +7881 @@ snapshots:
+@@ -6041 +7887 @@ snapshots:
 -      '@types/json5': 0.0.29
 +      "@types/json5": 0.0.29
-@@ -6102,22 +7942,22 @@ snapshots:
+@@ -6102,22 +7948,22 @@ snapshots:
 -      '@unrs/resolver-binding-android-arm-eabi': 1.12.2
 -      '@unrs/resolver-binding-android-arm64': 1.12.2
 -      '@unrs/resolver-binding-darwin-arm64': 1.12.2
@@ -10473,21 +10631,21 @@ index 598f1df970e8502c39d8996a1839cdcfba5a08a2..49624657d24cf203556d775673eaa03a
 +      "@unrs/resolver-binding-win32-arm64-msvc": 1.12.2
 +      "@unrs/resolver-binding-win32-ia32-msvc": 1.12.2
 +      "@unrs/resolver-binding-win32-x64-msvc": 1.12.2
-@@ -6140 +7980 @@ snapshots:
+@@ -6140 +7986 @@ snapshots:
 -      '@types/react': 19.2.17
 +      "@types/react": 19.2.17
-@@ -6152 +7992 @@ snapshots:
+@@ -6152 +7998 @@ snapshots:
 -      '@types/react': 19.2.17
 +      "@types/react": 19.2.17
-@@ -6164 +8004 @@ snapshots:
+@@ -6164 +8010 @@ snapshots:
 -      '@radix-ui/react-dialog': 1.1.16(@types/react-dom@19.2.3(@types/react@19.2.17))(@types/react@19.2.17)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
 +      "@radix-ui/react-dialog": 1.1.16(@types/react-dom@19.2.3(@types/react@19.2.17))(@types/react@19.2.17)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
-@@ -6168,2 +8008,2 @@ snapshots:
+@@ -6168,2 +8014,2 @@ snapshots:
 -      - '@types/react'
 -      - '@types/react-dom'
 +      - "@types/react"
 +      - "@types/react-dom"
-@@ -6173,7 +8013,7 @@ snapshots:
+@@ -6173,7 +8019,7 @@ snapshots:
 -      '@types/d3-array': 3.2.2
 -      '@types/d3-ease': 3.0.2
 -      '@types/d3-interpolate': 3.0.4
@@ -26435,10 +26593,10 @@ index 0000000000000000000000000000000000000000..5a8eb28766cc4d7927e0306feef968f4
 +    _JOB_EXECUTOR.submit(_execute_evaluation_v2, run_id)
 diff --git a/server/prod.Dockerfile b/server/prod.Dockerfile
 new file mode 100644
-index 0000000000000000000000000000000000000000..4a0e29b5f7036131fb29f9ab582ecee47f2edf6f
+index 0000000000000000000000000000000000000000..bc1bb6d0f950c48a7548fdfdb2bdae548b0acbb4
 --- /dev/null
 +++ b/server/prod.Dockerfile
-@@ -0,0 +1,25 @@
+@@ -0,0 +1,26 @@
 +FROM python:3.12-slim@sha256:646fb0bca3dd3ea1bcc6feb72c17ed16eed6e10cffc732fcc1478bd3e7f02d7b
 +
 +ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -26447,6 +26605,7 @@ index 0000000000000000000000000000000000000000..4a0e29b5f7036131fb29f9ab582ecee4
 +
 +WORKDIR /app
 +RUN apt-get update \
++    && apt-get upgrade --yes \
 +    && apt-get install --yes --no-install-recommends ca-certificates postgresql-client restic \
 +    && rm -rf /var/lib/apt/lists/*
 +RUN useradd --create-home --uid 10001 appuser

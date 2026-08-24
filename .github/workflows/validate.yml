@@ -323,6 +323,7 @@ jobs:
         run: >-
           docker run --rm -v "$PWD:/workspace:ro" "$TRIVY_IMAGE"
           fs --exit-code 1 --severity HIGH,CRITICAL --scanners vuln,secret,misconfig
+          --ignorefile /workspace/.trivyignore.yaml
           --skip-dirs /workspace/.mem0-source /workspace
       - name: 登录 GitHub Container Registry
         env:
@@ -370,7 +371,7 @@ jobs:
               *@sha256:*) ;;
               *) echo "${component} 未使用不可变镜像摘要" >&2; exit 1 ;;
             esac
-            docker run --rm -v "$HOME/.docker:/root/.docker:ro" "$TRIVY_IMAGE" image --exit-code 1 --severity HIGH,CRITICAL "$image"
+            docker run --rm -v "$HOME/.docker:/root/.docker:ro" -v "$PWD:/workspace:ro" "$TRIVY_IMAGE" image --exit-code 1 --severity HIGH,CRITICAL --ignorefile /workspace/.trivyignore.yaml "$image"
             docker run --rm -v "$HOME/.docker:/root/.docker:ro" -v "$PWD:/workspace" "$SYFT_IMAGE" "$image" -o "spdx-json=/workspace/sbom-${component}.spdx.json"
             docker run --rm -v "$HOME/.docker:/root/.docker:ro" -v "$PWD:/workspace:ro" -e ACTIONS_ID_TOKEN_REQUEST_TOKEN -e ACTIONS_ID_TOKEN_REQUEST_URL "$COSIGN_IMAGE" attest --yes --type spdxjson --predicate "/workspace/sbom-${component}.spdx.json" "$image"
             docker run --rm -v "$HOME/.docker:/root/.docker:ro" -e ACTIONS_ID_TOKEN_REQUEST_TOKEN -e ACTIONS_ID_TOKEN_REQUEST_URL "$COSIGN_IMAGE" sign --yes "$image"
