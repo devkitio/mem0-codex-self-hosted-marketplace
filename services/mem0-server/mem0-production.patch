@@ -19854,7 +19854,7 @@ index 0000000000000000000000000000000000000000..cf5cdc09a8963abb06c2d60a3a865e39
 +            headers={"Retry-After": str(retry_after), "X-Quota-Scope": operation},
 +        )
 diff --git a/server/main.py b/server/main.py
-index 20059fb8ed6075f7371f89215cb7990d8566a066..591fc085189c4df27afb265370193d13fd749af3 100644
+index 20059fb8ed6075f7371f89215cb7990d8566a066..d755199c8f3ca890dd81d0186f64346b653f3dcb 100644
 --- a/server/main.py
 +++ b/server/main.py
 @@ -1,0 +2,4 @@ import asyncio
@@ -19862,24 +19862,25 @@ index 20059fb8ed6075f7371f89215cb7990d8566a066..591fc085189c4df27afb265370193d13
 +import hashlib
 +import hmac
 +import json
-@@ -3,0 +8 @@ import os
+@@ -3,0 +8,2 @@ import os
++import re
 +import threading
-@@ -5 +10,5 @@ import time
+@@ -5 +11,5 @@ import time
 -from typing import Any, Dict, List, Optional
 +import uuid
 +from contextlib import contextmanager, nullcontext
 +from datetime import datetime, timedelta, timezone
 +from pathlib import Path
 +from typing import Any, Dict, List, Literal, Optional
-@@ -8 +17,3 @@ import telemetry
+@@ -8 +18,3 @@ import telemetry
 -from auth import ADMIN_API_KEY, AUTH_DISABLED, JWT_SECRET, require_admin, verify_auth
 +from observability import configure_logging, configure_tracing
 +from metrics import increment as metric_increment, observe as metric_observe, render as render_metrics
 +from auth import ADMIN_API_KEY, AUTH_DISABLED, JWT_SECRET, require_admin, require_editor, require_reader
-@@ -19 +30 @@ from errors import (
+@@ -19 +31 @@ from errors import (
 -from fastapi import Depends, FastAPI, HTTPException, Query, Request
 +from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
-@@ -21,2 +32,29 @@ from fastapi.middleware.cors import CORSMiddleware
+@@ -21,2 +33,29 @@ from fastapi.middleware.cors import CORSMiddleware
 -from fastapi.responses import JSONResponse, RedirectResponse
 -from models import RequestLog, User
 +from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse
@@ -19911,13 +19912,13 @@ index 20059fb8ed6075f7371f89215cb7990d8566a066..591fc085189c4df27afb265370193d13
 +)
 +from mcp_scope import derive_mcp_agent_id, validate_mcp_identity
 +from models import MemoryCandidate, MemoryCatalog, MemoryFeedback, MCPDeletionOperation, RequestLog, User
-@@ -26,0 +65 @@ from routers import auth as auth_router
+@@ -26,0 +66 @@ from routers import auth as auth_router
 +from routers import categories as categories_router
-@@ -27,0 +67,3 @@ from routers import entities as entities_router
+@@ -27,0 +68,3 @@ from routers import entities as entities_router
 +from routers import exports as exports_router
 +from routers import memory_governance as memory_governance_router
 +from routers import platform_operations as platform_operations_router
-@@ -29,0 +72,9 @@ from schemas import MessageResponse
+@@ -29,0 +73,9 @@ from schemas import MessageResponse
 +from platform_service import (
 +    assert_memory_access,
 +    assert_project_access,
@@ -19927,14 +19928,14 @@ index 20059fb8ed6075f7371f89215cb7990d8566a066..591fc085189c4df27afb265370193d13
 +    protect_sensitive_value,
 +    scope_filters_for_user,
 +)
-@@ -39 +90,2 @@ from slowapi.errors import RateLimitExceeded
+@@ -39 +91,2 @@ from slowapi.errors import RateLimitExceeded
 -from sqlalchemy import func, select
 +from sqlalchemy import and_, func, or_, select, text
 +from sqlalchemy.exc import IntegrityError
-@@ -44,0 +97,2 @@ load_dotenv()
+@@ -44,0 +98,2 @@ load_dotenv()
 +from config import config as CUSTOM_CONFIG  # noqa: E402
 +
-@@ -46 +100,21 @@ install_request_id_logging()
+@@ -46 +101,21 @@ install_request_id_logging()
 -logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - [%(request_id)s] %(message)s")
 +configure_logging()
 +TRACER = configure_tracing("mem0-api")
@@ -19957,16 +19958,16 @@ index 20059fb8ed6075f7371f89215cb7990d8566a066..591fc085189c4df27afb265370193d13
 +logging.getLogger("mem0").setLevel(logging.WARNING)
 +for handler in logging.getLogger().handlers:
 +    handler.addFilter(MEM0_CORE_PRIVACY_FILTER)
-@@ -59,2 +133,2 @@ SENSITIVE_CONFIG_KEYS = {
+@@ -59,2 +134,2 @@ SENSITIVE_CONFIG_KEYS = {
 -SKIPPED_REQUEST_LOG_PATHS = {"/api/health", "/docs", "/redoc", "/openapi.json"}
 -SKIPPED_REQUEST_LOG_PREFIXES = ("/requests",)
 +SKIPPED_REQUEST_LOG_PATHS = {"/api/health", "/api/livez", "/api/readyz", "/docs", "/redoc", "/openapi.json"}
 +SKIPPED_REQUEST_LOG_PREFIXES = ("/requests", "/internal/mcp")
-@@ -63,0 +138,3 @@ BUNDLED_EMBEDDER_PROVIDERS = ("openai", "gemini")
+@@ -63,0 +139,3 @@ BUNDLED_EMBEDDER_PROVIDERS = ("openai", "gemini")
 +PROJECT_ID_PATTERN = r"^[A-Za-z0-9._-]{1,64}$"
 +ENTITY_ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
 +HASH_PATTERN = r"^[0-9a-f]{64}$"
-@@ -108,32 +185,20 @@ telemetry.log_status()
+@@ -108,32 +186,20 @@ telemetry.log_status()
 -POSTGRES_HOST = os.environ.get("POSTGRES_HOST", "postgres")
 -POSTGRES_PORT = os.environ.get("POSTGRES_PORT", "5432")
 -POSTGRES_DB = os.environ.get("POSTGRES_DB", "postgres")
@@ -20019,7 +20020,7 @@ index 20059fb8ed6075f7371f89215cb7990d8566a066..591fc085189c4df27afb265370193d13
 +        raise RuntimeError(f"{name} 必须仅包含可见 ASCII 字符")
 +    return value
 +
-@@ -140,0 +206,23 @@ DEFAULT_CONFIG = {
+@@ -140,0 +207,23 @@ DEFAULT_CONFIG = {
 +INTERNAL_SERVICE_KEY = _secret("MEM0_INTERNAL_SERVICE_KEY", minimum_length=32)
 +INTERNAL_USER_ID = validate_mcp_identity(
 +    os.environ.get("MEM0_INTERNAL_USER_ID", ""), "MEM0_INTERNAL_USER_ID"
@@ -20043,16 +20044,16 @@ index 20059fb8ed6075f7371f89215cb7990d8566a066..591fc085189c4df27afb265370193d13
 +_READINESS_LOCK = threading.Lock()
 +_READINESS_CHECKED_AT = 0.0
 +_READINESS_OK = False
-@@ -143 +231 @@ set_session_factory(SessionLocal)
+@@ -143 +232 @@ set_session_factory(SessionLocal)
 -initialize_state(DEFAULT_CONFIG)
 +initialize_state(CUSTOM_CONFIG)
-@@ -170,0 +259 @@ app.include_router(api_keys_router.router)
+@@ -170,0 +260 @@ app.include_router(api_keys_router.router)
 +app.include_router(categories_router.router)
-@@ -171,0 +261,3 @@ app.include_router(entities_router.router)
+@@ -171,0 +262,3 @@ app.include_router(entities_router.router)
 +app.include_router(exports_router.router)
 +app.include_router(memory_governance_router.router)
 +app.include_router(platform_operations_router.router)
-@@ -179,0 +272,7 @@ class Message(BaseModel):
+@@ -179,0 +273,7 @@ class Message(BaseModel):
 +class InternalMessage(BaseModel):
 +    role: Literal["user", "assistant", "system"]
 +    content: str = Field(..., min_length=1, max_length=50000)
@@ -20060,13 +20061,13 @@ index 20059fb8ed6075f7371f89215cb7990d8566a066..591fc085189c4df27afb265370193d13
 +    model_config = {"extra": "forbid"}
 +
 +
-@@ -189,0 +289,3 @@ class MemoryCreate(BaseModel):
+@@ -189,0 +290,3 @@ class MemoryCreate(BaseModel):
 +    write_mode: Literal["direct", "risk_assessed"] = Field(
 +        "direct", description="写入模式；自动生命周期写入应使用 risk_assessed。"
 +    )
-@@ -205,0 +308 @@ class SearchRequest(BaseModel):
+@@ -205,0 +309 @@ class SearchRequest(BaseModel):
 +    rerank: Optional[bool] = Field(None, description="Rerank results when a reranker is configured.")
-@@ -207,0 +311,99 @@ class SearchRequest(BaseModel):
+@@ -207,0 +312,99 @@ class SearchRequest(BaseModel):
 +    search_mode: Literal["hybrid", "vector"] = Field("hybrid", description="Retrieval mode.")
 +    final_score_threshold: Optional[float] = Field(None, ge=0, le=1, description="最终排序分数阈值。")
 +    validity_mode: Literal["current", "as_of", "all"] = "current"
@@ -20166,7 +20167,7 @@ index 20059fb8ed6075f7371f89215cb7990d8566a066..591fc085189c4df27afb265370193d13
 +    expected_count: int = Field(..., ge=0, le=INTERNAL_SCAN_LIMIT)
 +    operation_id: uuid.UUID
 +    operation_expires_at: int = Field(..., ge=0, le=4102444800)
-@@ -217,3 +419,5 @@ def _client_error(exc: Exception) -> HTTPException:
+@@ -217,3 +420,5 @@ def _client_error(exc: Exception) -> HTTPException:
 -    detail = str(exc)
 -    status_code = 404 if isinstance(exc, ValueError) and "not found" in detail.lower() else 400
 -    return HTTPException(status_code=status_code, detail=detail)
@@ -20175,7 +20176,7 @@ index 20059fb8ed6075f7371f89215cb7990d8566a066..591fc085189c4df27afb265370193d13
 +        status_code=404 if not_found else 400,
 +        detail="请求的资源不存在" if not_found else "请求参数无效",
 +    )
-@@ -231,0 +436,767 @@ def _redact_config(value: Any, key: str | None = None) -> Any:
+@@ -231,0 +437,767 @@ def _redact_config(value: Any, key: str | None = None) -> Any:
 +_INTERNAL_FILTER_FIELDS = {"metadata", "run_id", "created_at", "updated_at", "expiration_date"}
 +_INTERNAL_FILTER_LOGICAL = {"AND", "OR", "NOT"}
 +_INTERNAL_FILTER_OPERATORS = {"eq", "ne", "in", "nin", "gt", "gte", "lt", "lte", "contains", "icontains"}
@@ -20943,17 +20944,17 @@ index 20059fb8ed6075f7371f89215cb7990d8566a066..591fc085189c4df27afb265370193d13
 +    return hmac.compare_digest(_memory_version(item), expected_version)
 +
 +
-@@ -287 +1258 @@ def _persist_request_log(method: str, path: str, status_code: int, latency_ms: f
+@@ -287 +1259 @@ def _persist_request_log(method: str, path: str, status_code: int, latency_ms: f
 -        logging.exception("Failed to persist request log")
 +        logging.warning("请求日志持久化失败")
-@@ -295 +1266,3 @@ async def log_requests(request: Request, call_next):
+@@ -295 +1267,3 @@ async def log_requests(request: Request, call_next):
 -    rid = new_request_id()
 +    incoming_id = request.headers.get("X-Correlation-ID", "")
 +    rid = incoming_id if re.fullmatch(r"[A-Za-z0-9._:-]{8,64}", incoming_id) else new_request_id()
 +    request.state.correlation_id = rid
-@@ -299,0 +1273 @@ async def log_requests(request: Request, call_next):
+@@ -299,0 +1274 @@ async def log_requests(request: Request, call_next):
 +    span_context = TRACER.start_as_current_span("http.request") if TRACER else nullcontext()
-@@ -301 +1275,9 @@ async def log_requests(request: Request, call_next):
+@@ -301 +1276,9 @@ async def log_requests(request: Request, call_next):
 -        response = await call_next(request)
 +        with span_context as span:
 +            if span:
@@ -20964,7 +20965,7 @@ index 20059fb8ed6075f7371f89215cb7990d8566a066..591fc085189c4df27afb265370193d13
 +                route = request.scope.get("route")
 +                span.set_attribute("http.route", str(getattr(route, "path", "unknown")))
 +                span.set_attribute("http.response.status_code", response.status_code)
-@@ -303,0 +1286,17 @@ async def log_requests(request: Request, call_next):
+@@ -303,0 +1287,17 @@ async def log_requests(request: Request, call_next):
 +        response.headers["X-Correlation-ID"] = rid
 +        route = request.scope.get("route")
 +        route_path = getattr(route, "path", request.url.path)
@@ -20982,10 +20983,10 @@ index 20059fb8ed6075f7371f89215cb7990d8566a066..591fc085189c4df27afb265370193d13
 +            method=request.method,
 +            route=str(route_path),
 +        )
-@@ -323 +1322 @@ async def log_requests(request: Request, call_next):
+@@ -323 +1323 @@ async def log_requests(request: Request, call_next):
 -def get_config(_auth=Depends(verify_auth)):
 +def get_config(_auth=Depends(require_admin)):
-@@ -326,0 +1326,54 @@ def get_config(_auth=Depends(verify_auth)):
+@@ -326,0 +1327,54 @@ def get_config(_auth=Depends(verify_auth)):
 +@app.get("/api/livez", include_in_schema=False)
 +def api_livez():
 +    return {"status": "ok"}
@@ -21040,16 +21041,16 @@ index 20059fb8ed6075f7371f89215cb7990d8566a066..591fc085189c4df27afb265370193d13
 +    return _readiness_response()
 +
 +
-@@ -328 +1381 @@ def get_config(_auth=Depends(verify_auth)):
+@@ -328 +1382 @@ def get_config(_auth=Depends(verify_auth)):
 -def list_bundled_providers(_auth=Depends(verify_auth)):
 +def list_bundled_providers(_auth=Depends(require_admin)):
-@@ -341 +1394 @@ def set_config(config: Dict[str, Any], _auth=Depends(require_admin)):
+@@ -341 +1395 @@ def set_config(config: Dict[str, Any], _auth=Depends(require_admin)):
 -def generate_instructions(req: GenerateInstructionsRequest, _auth=Depends(verify_auth)):
 +def generate_instructions(req: GenerateInstructionsRequest, _auth=Depends(require_admin)):
-@@ -368 +1421 @@ def generate_instructions(req: GenerateInstructionsRequest, _auth=Depends(verify
+@@ -368 +1422 @@ def generate_instructions(req: GenerateInstructionsRequest, _auth=Depends(verify
 -def add_memory(memory_create: MemoryCreate, _auth=Depends(verify_auth)):
 +def add_memory(memory_create: MemoryCreate, _auth=Depends(require_editor)):
-@@ -373 +1426,75 @@ def add_memory(memory_create: MemoryCreate, _auth=Depends(verify_auth)):
+@@ -373 +1427,75 @@ def add_memory(memory_create: MemoryCreate, _auth=Depends(verify_auth)):
 -    params = {k: v for k, v in memory_create.model_dump().items() if v is not None and k != "messages"}
 +    settings = get_governance_settings()
 +    protection_settings = settings
@@ -21126,10 +21127,10 @@ index 20059fb8ed6075f7371f89215cb7990d8566a066..591fc085189c4df27afb265370193d13
 +        if v is not None and k not in {"messages", "metadata", "write_mode"}
 +    }
 +    params["metadata"] = metadata
-@@ -375 +1502 @@ def add_memory(memory_create: MemoryCreate, _auth=Depends(verify_auth)):
+@@ -375 +1503 @@ def add_memory(memory_create: MemoryCreate, _auth=Depends(verify_auth)):
 -        response = get_memory_instance().add(messages=[m.model_dump() for m in memory_create.messages], **params)
 +        response = get_memory_instance().add(messages=messages, **params)
-@@ -377,0 +1505,32 @@ def add_memory(memory_create: MemoryCreate, _auth=Depends(verify_auth)):
+@@ -377,0 +1506,32 @@ def add_memory(memory_create: MemoryCreate, _auth=Depends(verify_auth)):
 +        quality_errors = []
 +        for item in response.get("results", []):
 +            if isinstance(item, dict) and item.get("id"):
@@ -21162,20 +21163,20 @@ index 20059fb8ed6075f7371f89215cb7990d8566a066..591fc085189c4df27afb265370193d13
 +                status_code=207,
 +                content=json.loads(json.dumps(response, ensure_ascii=False, default=str)),
 +            )
-@@ -379,0 +1539 @@ def add_memory(memory_create: MemoryCreate, _auth=Depends(verify_auth)):
+@@ -379,0 +1540 @@ def add_memory(memory_create: MemoryCreate, _auth=Depends(verify_auth)):
 +        log_memory_activity("create", user=_auth, success=False, details={"错误类型": type(e).__name__})
-@@ -381 +1541,2 @@ def add_memory(memory_create: MemoryCreate, _auth=Depends(verify_auth)):
+@@ -381 +1542,2 @@ def add_memory(memory_create: MemoryCreate, _auth=Depends(verify_auth)):
 -    except Exception:
 +    except Exception as exc:
 +        log_memory_activity("create", user=_auth, success=False, details={"错误类型": type(exc).__name__})
-@@ -385 +1546,2 @@ def add_memory(memory_create: MemoryCreate, _auth=Depends(verify_auth)):
+@@ -385 +1547,2 @@ def add_memory(memory_create: MemoryCreate, _auth=Depends(verify_auth)):
 -ALL_MEMORIES_LIMIT = 1000
 +ALL_MEMORIES_LIMIT = 5000
 +MUTATION_BULK_LIMIT = 100000
-@@ -419 +1581 @@ def get_all_memories(
+@@ -419 +1582 @@ def get_all_memories(
 -    _auth=Depends(verify_auth),
 +    _auth=Depends(require_reader),
-@@ -424,5 +1586,9 @@ def get_all_memories(
+@@ -424,5 +1587,9 @@ def get_all_memories(
 -            auth_type = getattr(request.state, "auth_type", "none")
 -            if _auth is not None and _auth.role != "admin" and auth_type not in {"admin_api_key", "disabled"}:
 -                raise HTTPException(status_code=403, detail="Admin role required to list all memories.")
@@ -21190,14 +21191,14 @@ index 20059fb8ed6075f7371f89215cb7990d8566a066..591fc085189c4df27afb265370193d13
 +                    if str((item.get("metadata") or {}).get("project_id") or "") in allowed
 +                ]
 +            return result
-@@ -432 +1598,2 @@ def get_all_memories(
+@@ -432 +1599,2 @@ def get_all_memories(
 -        params = {"filters": filters}
 +        filters = scope_filters_for_user(_auth, filters)
 +        params = {"filters": _vector_store_filter(filters)}
-@@ -444 +1611 @@ def get_all_memories(
+@@ -444 +1612 @@ def get_all_memories(
 -def get_memory(memory_id: str, _auth=Depends(verify_auth)):
 +def get_memory(memory_id: str, _auth=Depends(require_reader)):
-@@ -447,2 +1614,11 @@ def get_memory(memory_id: str, _auth=Depends(verify_auth)):
+@@ -447,2 +1615,11 @@ def get_memory(memory_id: str, _auth=Depends(verify_auth)):
 -        return get_memory_instance().get(memory_id)
 -    except Exception:
 +        with _memory_operation_lock(memory_id):
@@ -21211,13 +21212,13 @@ index 20059fb8ed6075f7371f89215cb7990d8566a066..591fc085189c4df27afb265370193d13
 +        raise
 +    except Exception as exc:
 +        log_memory_activity("read", user=_auth, memory_id=memory_id, success=False, details={"错误类型": type(exc).__name__})
-@@ -453 +1629 @@ def get_memory(memory_id: str, _auth=Depends(verify_auth)):
+@@ -453 +1630 @@ def get_memory(memory_id: str, _auth=Depends(verify_auth)):
 -def search_memories(search_req: SearchRequest, _auth=Depends(verify_auth)):
 +def search_memories(search_req: SearchRequest, _auth=Depends(require_reader)):
-@@ -454,0 +1631,2 @@ def search_memories(search_req: SearchRequest, _auth=Depends(verify_auth)):
+@@ -454,0 +1632,2 @@ def search_memories(search_req: SearchRequest, _auth=Depends(verify_auth)):
 +    started_at = time.perf_counter()
 +    project_id = None
-@@ -456 +1634,6 @@ def search_memories(search_req: SearchRequest, _auth=Depends(verify_auth)):
+@@ -456 +1635,6 @@ def search_memories(search_req: SearchRequest, _auth=Depends(verify_auth)):
 -        filters = search_req.filters or {}
 +        if search_req.validity_mode == "all" and _auth.role != "admin":
 +            raise HTTPException(status_code=403, detail="只有管理员可以查询全部记忆状态。")
@@ -21225,16 +21226,16 @@ index 20059fb8ed6075f7371f89215cb7990d8566a066..591fc085189c4df27afb265370193d13
 +            raise HTTPException(status_code=422, detail="as_of 模式必须提供时间点。")
 +        as_of_value = _parse_cutoff(search_req.as_of) if search_req.validity_mode == "as_of" else None
 +        filters = dict(search_req.filters or {})
-@@ -469,3 +1652,2 @@ def search_memories(search_req: SearchRequest, _auth=Depends(verify_auth)):
+@@ -469,3 +1653,2 @@ def search_memories(search_req: SearchRequest, _auth=Depends(verify_auth)):
 -        params = {}
 -        if search_req.top_k is not None:
 -            params["top_k"] = search_req.top_k
 +        requested_top_k = search_req.top_k if search_req.top_k is not None else 20
 +        params = {"top_k": requested_top_k}
-@@ -473,0 +1656,2 @@ def search_memories(search_req: SearchRequest, _auth=Depends(verify_auth)):
+@@ -473,0 +1657,2 @@ def search_memories(search_req: SearchRequest, _auth=Depends(verify_auth)):
 +        if search_req.rerank is not None:
 +            params["rerank"] = search_req.rerank
-@@ -478,3 +1662,262 @@ def search_memories(search_req: SearchRequest, _auth=Depends(verify_auth)):
+@@ -478,3 +1663,262 @@ def search_memories(search_req: SearchRequest, _auth=Depends(verify_auth)):
 -        return get_memory_instance().search(query=search_req.query, filters=filters, **params)
 -    except ValueError as e:
 -        raise HTTPException(status_code=400, detail=str(e))
@@ -21500,7 +21501,7 @@ index 20059fb8ed6075f7371f89215cb7990d8566a066..591fc085189c4df27afb265370193d13
 +            "result_hash": _result_hash(rows),
 +            "scanned": query.scan_limit if partial else None,
 +        }
-@@ -482,0 +1926,551 @@ def search_memories(search_req: SearchRequest, _auth=Depends(verify_auth)):
+@@ -482,0 +1927,551 @@ def search_memories(search_req: SearchRequest, _auth=Depends(verify_auth)):
 +    except (ValueError, Mem0ValidationError) as exc:
 +        raise _client_error(exc)
 +    except Exception:
@@ -22052,10 +22053,10 @@ index 20059fb8ed6075f7371f89215cb7990d8566a066..591fc085189c4df27afb265370193d13
 +        raise
 +    except (ValueError, Mem0ValidationError) as exc:
 +        raise _client_error(exc)
-@@ -488 +2482 @@ def search_memories(search_req: SearchRequest, _auth=Depends(verify_auth)):
+@@ -488 +2483 @@ def search_memories(search_req: SearchRequest, _auth=Depends(verify_auth)):
 -def update_memory(memory_id: str, updated_memory: MemoryUpdate, _auth=Depends(verify_auth)):
 +def update_memory(memory_id: str, updated_memory: MemoryUpdate, _auth=Depends(require_editor)):
-@@ -491,0 +2486,9 @@ def update_memory(memory_id: str, updated_memory: MemoryUpdate, _auth=Depends(ve
+@@ -491,0 +2487,9 @@ def update_memory(memory_id: str, updated_memory: MemoryUpdate, _auth=Depends(ve
 +        current = get_memory_instance().get(memory_id)
 +        assert_memory_access(_auth, current if isinstance(current, dict) else None, write=True)
 +        current_metadata = current.get("metadata") if isinstance(current, dict) else {}
@@ -22065,7 +22066,7 @@ index 20059fb8ed6075f7371f89215cb7990d8566a066..591fc085189c4df27afb265370193d13
 +            current_metadata.get("project_id") if isinstance(current_metadata, dict) else None,
 +        )
 +        settings = get_governance_settings()
-@@ -494 +2497,12 @@ def update_memory(memory_id: str, updated_memory: MemoryUpdate, _auth=Depends(ve
+@@ -494 +2498,12 @@ def update_memory(memory_id: str, updated_memory: MemoryUpdate, _auth=Depends(ve
 -            params["data"] = updated_memory.text
 +            protected_text, findings = protect_sensitive_value(updated_memory.text, settings)
 +            params["data"] = protected_text
@@ -22079,7 +22080,7 @@ index 20059fb8ed6075f7371f89215cb7990d8566a066..591fc085189c4df27afb265370193d13
 +                raise HTTPException(status_code=409, detail={"message": "修改内容与现有记忆可能冲突。", "conflicts": conflicts})
 +            if findings:
 +                log_memory_activity("sensitive", user=_auth, memory_id=memory_id, details={"发现数量": len(findings)})
-@@ -496 +2510,8 @@ def update_memory(memory_id: str, updated_memory: MemoryUpdate, _auth=Depends(ve
+@@ -496 +2511,8 @@ def update_memory(memory_id: str, updated_memory: MemoryUpdate, _auth=Depends(ve
 -            params["metadata"] = updated_memory.metadata
 +            protected_metadata, _findings = protect_sensitive_value(updated_memory.metadata, settings)
 +            current_metadata = current.get("metadata") if isinstance(current, dict) else {}
@@ -22089,7 +22090,7 @@ index 20059fb8ed6075f7371f89215cb7990d8566a066..591fc085189c4df27afb265370193d13
 +            )
 +            assert_project_access(_auth, str(next_project_id) if next_project_id else None, write=True)
 +            params["metadata"] = protected_metadata
-@@ -499 +2520,31 @@ def update_memory(memory_id: str, updated_memory: MemoryUpdate, _auth=Depends(ve
+@@ -499 +2521,31 @@ def update_memory(memory_id: str, updated_memory: MemoryUpdate, _auth=Depends(ve
 -        return get_memory_instance().update(**params)
 +        operation_id = begin_mutation(
 +            "update", memory_id=memory_id, before_payload=current, reason="REST 更新"
@@ -22122,16 +22123,16 @@ index 20059fb8ed6075f7371f89215cb7990d8566a066..591fc085189c4df27afb265370193d13
 +        return result
 +    except HTTPException:
 +        raise
-@@ -500,0 +2552 @@ def update_memory(memory_id: str, updated_memory: MemoryUpdate, _auth=Depends(ve
+@@ -500,0 +2553 @@ def update_memory(memory_id: str, updated_memory: MemoryUpdate, _auth=Depends(ve
 +        log_memory_activity("update", user=_auth, memory_id=memory_id, success=False, details={"错误类型": type(e).__name__})
-@@ -502 +2554,2 @@ def update_memory(memory_id: str, updated_memory: MemoryUpdate, _auth=Depends(ve
+@@ -502 +2555,2 @@ def update_memory(memory_id: str, updated_memory: MemoryUpdate, _auth=Depends(ve
 -    except Exception:
 +    except Exception as exc:
 +        log_memory_activity("update", user=_auth, memory_id=memory_id, success=False, details={"错误类型": type(exc).__name__})
-@@ -507 +2560 @@ def update_memory(memory_id: str, updated_memory: MemoryUpdate, _auth=Depends(ve
+@@ -507 +2561 @@ def update_memory(memory_id: str, updated_memory: MemoryUpdate, _auth=Depends(ve
 -def memory_history(memory_id: str, _auth=Depends(verify_auth)):
 +def memory_history(memory_id: str, _auth=Depends(require_reader)):
-@@ -510,2 +2563,10 @@ def memory_history(memory_id: str, _auth=Depends(verify_auth)):
+@@ -510,2 +2564,10 @@ def memory_history(memory_id: str, _auth=Depends(verify_auth)):
 -        return get_memory_instance().history(memory_id=memory_id)
 -    except Exception:
 +        current = get_memory_instance().get(memory_id)
@@ -22144,10 +22145,10 @@ index 20059fb8ed6075f7371f89215cb7990d8566a066..591fc085189c4df27afb265370193d13
 +        raise
 +    except Exception as exc:
 +        log_memory_activity("history", user=_auth, memory_id=memory_id, success=False, details={"错误类型": type(exc).__name__})
-@@ -516 +2577 @@ def memory_history(memory_id: str, _auth=Depends(verify_auth)):
+@@ -516 +2578 @@ def memory_history(memory_id: str, _auth=Depends(verify_auth)):
 -def delete_memory(memory_id: str, _auth=Depends(verify_auth)):
 +def delete_memory(memory_id: str, _auth=Depends(require_editor)):
-@@ -519 +2580,30 @@ def delete_memory(memory_id: str, _auth=Depends(verify_auth)):
+@@ -519 +2581,30 @@ def delete_memory(memory_id: str, _auth=Depends(verify_auth)):
 -        get_memory_instance().delete(memory_id=memory_id)
 +        current = get_memory_instance().get(memory_id)
 +        assert_memory_access(_auth, current if isinstance(current, dict) else None, write=True)
@@ -22179,16 +22180,16 @@ index 20059fb8ed6075f7371f89215cb7990d8566a066..591fc085189c4df27afb265370193d13
 +                },
 +            )
 +        log_memory_activity("delete", user=_auth, memory_id=memory_id)
-@@ -520,0 +2611,2 @@ def delete_memory(memory_id: str, _auth=Depends(verify_auth)):
+@@ -520,0 +2612,2 @@ def delete_memory(memory_id: str, _auth=Depends(verify_auth)):
 +    except HTTPException:
 +        raise
-@@ -521,0 +2614 @@ def delete_memory(memory_id: str, _auth=Depends(verify_auth)):
+@@ -521,0 +2615 @@ def delete_memory(memory_id: str, _auth=Depends(verify_auth)):
 +        log_memory_activity("delete", user=_auth, memory_id=memory_id, success=False, details={"错误类型": type(e).__name__})
-@@ -523 +2616,2 @@ def delete_memory(memory_id: str, _auth=Depends(verify_auth)):
+@@ -523 +2617,2 @@ def delete_memory(memory_id: str, _auth=Depends(verify_auth)):
 -    except Exception:
 +    except Exception as exc:
 +        log_memory_activity("delete", user=_auth, memory_id=memory_id, success=False, details={"错误类型": type(exc).__name__})
-@@ -541 +2635,26 @@ def delete_all_memories(
+@@ -541 +2636,26 @@ def delete_all_memories(
 -        get_memory_instance().delete_all(**params)
 +        snapshot = get_memory_instance().get_all(
 +            filters=_vector_store_filter(params),
@@ -22216,13 +22217,13 @@ index 20059fb8ed6075f7371f89215cb7990d8566a066..591fc085189c4df27afb265370193d13
 +                content={"status": "partial", "message": "记忆已删除，但治理目录同步失败"},
 +            )
 +        log_memory_activity("delete_all", user=_auth, details={"筛选字段": sorted(params)})
-@@ -543 +2662,4 @@ def delete_all_memories(
+@@ -543 +2663,4 @@ def delete_all_memories(
 -    except Exception:
 +    except HTTPException:
 +        raise
 +    except Exception as exc:
 +        log_memory_activity("delete_all", user=_auth, success=False, details={"错误类型": type(exc).__name__})
-@@ -551 +2673,21 @@ def reset_memory(_auth=Depends(require_admin)):
+@@ -551 +2674,21 @@ def reset_memory(_auth=Depends(require_admin)):
 -        get_memory_instance().reset()
 +        rows = _list_all_memories(MUTATION_BULK_LIMIT + 1)["results"]
 +        if len(rows) > MUTATION_BULK_LIMIT:
@@ -22245,7 +22246,7 @@ index 20059fb8ed6075f7371f89215cb7990d8566a066..591fc085189c4df27afb265370193d13
 +                content={"status": "partial", "message": "记忆已重置，但治理目录同步失败"},
 +            )
 +        log_memory_activity("reset", user=_auth)
-@@ -553 +2695,4 @@ def reset_memory(_auth=Depends(require_admin)):
+@@ -553 +2696,4 @@ def reset_memory(_auth=Depends(require_admin)):
 -    except Exception:
 +    except HTTPException:
 +        raise
@@ -33434,10 +33435,10 @@ index b7b882a3e2448a52ca4a6392296d2411cf91e815..f06619cc762984cb78d6c0c343a8f269
 +    logging.info("首条记忆已保存，可在控制台中查看和管理")
 diff --git a/server/test_main.py b/server/test_main.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..bf9ad4bc66ae0f592a9f2c42c1328bd250ec7f8b
+index 0000000000000000000000000000000000000000..fbdfa4c75210fa76e1a2b1d3055b2fe644bea469
 --- /dev/null
 +++ b/server/test_main.py
-@@ -0,0 +1,1345 @@
+@@ -0,0 +1,1346 @@
 +import json
 +import logging
 +import os
@@ -34292,6 +34293,7 @@ index 0000000000000000000000000000000000000000..bf9ad4bc66ae0f592a9f2c42c1328bd2
 +                "retrieval_mode": "hybrid",
 +                "status": "no_results",
 +                "error": None,
++                "ranking_trace_id": None,
 +            },
 +        )
 +        self.assertEqual(hybrid.call_args.args[3], 0.1)

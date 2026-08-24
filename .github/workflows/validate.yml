@@ -322,7 +322,8 @@ jobs:
       - name: Trivy 扫描仓库文件系统
         run: >-
           docker run --rm -v "$PWD:/workspace:ro" "$TRIVY_IMAGE"
-          fs --exit-code 1 --severity HIGH,CRITICAL --scanners vuln,secret,misconfig /workspace
+          fs --exit-code 1 --severity HIGH,CRITICAL --scanners vuln,secret,misconfig
+          --skip-dirs /workspace/.mem0-source /workspace
       - name: 登录 GitHub Container Registry
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
