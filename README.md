@@ -107,6 +107,7 @@ Git 仓库用于重建代码，不用于恢复生产数据。要恢复已有记�
 - Linux 主机，已安装 Git、Python 3.10 或更高版本、OpenSSL、Docker Engine 和 Docker Compose 插件。
 - 两个 HTTPS 入口：一个用于 Dashboard，一个用于 API 与精确路径 `/mcp`。
 - 能访问选定的 LLM 和 Embedding 服务。
+- 已准备禁止公开访问且启用版本控制的 S3 兼容 Bucket，并能通过 SMTP 发送告警邮件；这两项是生产发布前置条件。
 - 参考 Compose 要求连接已经存在的反向代理与模型网关外部 Docker 网络；名称必须由部署者显式配置。
 - 镜像支持 `linux/amd64` 与 `linux/arm64`；应在目标架构构建，或使用 Buildx 显式指定平台。
 
@@ -135,7 +136,8 @@ python3 scripts/materialize_mem0.py .mem0-source
 
 - `.mem0-source/server/prod.Dockerfile`：Mem0 API 生产镜像。
 - `.mem0-source/server/dashboard/Dockerfile`：Dashboard 镜像。
-- `.mem0-source/server/docker-compose.yaml`：API、MCP Adapter、Dashboard 与 PostgreSQL 编排。
+- `.mem0-source/server/docker-compose.yaml`：API、MCP Adapter、Dashboard、双 PostgreSQL、监控与隔离恢复演练编排。
+- `.mem0-source/server/monitoring/`：Prometheus、Grafana、Alertmanager、Loki、Tempo 与 OpenTelemetry Collector 的固定配置。
 - `.mem0-source/openresty/`：当前参考部署的反向代理、限流和隐私日志配置。
 - `services/mem0-mcp/`：MCP Adapter 的唯一受版本控制源码。
 
@@ -161,7 +163,7 @@ sudo install -m 0644 services/mem0-mcp/test_adapter.py /data/mem0Mcp/test_adapte
 
 ### 4. 生成 Secret 与运行配置
 
-以下五个 Secret 应分别随机生成；三个 MCP Adapter Secret 必须两两不同：
+以下基础 Secret 应分别随机生成；三个 MCP Adapter Secret 必须两两不同：
 
 ```bash
 sudo sh -c 'umask 077; openssl rand -hex 32 > /data/mem0-runtime/secrets/postgres_password'
@@ -169,7 +171,14 @@ sudo sh -c 'umask 077; openssl rand -hex 32 > /data/mem0-runtime/secrets/mem0_jw
 sudo sh -c 'umask 077; openssl rand -hex 32 > /data/mem0Mcp/secrets/mem0_internal_service_key'
 sudo sh -c 'umask 077; openssl rand -hex 32 > /data/mem0Mcp/secrets/mcp_confirmation_secret'
 sudo sh -c 'umask 077; openssl rand -hex 32 > /data/mem0Mcp/secrets/mcp_project_scope_secret'
-sudo chown 10001:10001 /data/mem0-runtime/secrets/* /data/mem0Mcp/secrets/*
+sudo sh -c 'umask 077; openssl rand -hex 32 > /data/mem0-runtime/secrets/mem0_restic_password'
+sudo sh -c 'umask 077; openssl rand -hex 32 > /data/mem0-runtime/secrets/grafana_admin_password'
+sudo chown 10001:10001 \
+  /data/mem0-runtime/secrets/postgres_password \
+  /data/mem0-runtime/secrets/mem0_jwt_secret \
+  /data/mem0-runtime/secrets/mem0_restic_password \
+  /data/mem0Mcp/secrets/*
+sudo chown 472:472 /data/mem0-runtime/secrets/grafana_admin_password
 sudo chmod 0400 /data/mem0-runtime/secrets/* /data/mem0Mcp/secrets/*
 ```
 
@@ -183,8 +192,13 @@ sudo chmod 0400 /data/mem0-runtime/secrets/* /data/mem0Mcp/secrets/*
 | `/data/mem0-runtime/secrets/llm_api_base` | OpenAI 兼容 LLM Base URL |
 | `/data/mem0-runtime/secrets/embedding_api_key` | Embedding 服务 API Key |
 | `/data/mem0-runtime/secrets/embedding_api_base` | OpenAI 兼容 Embedding Base URL |
+| `/data/mem0-runtime/secrets/mem0_s3_endpoint` | S3 兼容服务 Endpoint |
+| `/data/mem0-runtime/secrets/mem0_s3_bucket` | 禁止公开访问且启用版本控制的 Bucket 名称 |
+| `/data/mem0-runtime/secrets/mem0_s3_access_key` | 仅允许备份 Bucket 的访问标识 |
+| `/data/mem0-runtime/secrets/mem0_s3_secret_key` | 仅允许备份 Bucket 的访问密钥 |
+| `/data/mem0-runtime/secrets/alertmanager.yml` | 包含 SMTP 发件、收件人与认证信息的完整 Alertmanager 配置 |
 
-写入这四个模型配置文件后，同样将所有者设置为 `10001:10001`、权限设置为 `0400`。生产 Compose 会把 Secret 挂载到 `/run/secrets`，不会通过普通环境变量传递。UID `10001` 是 Mem0 API 与 MCP Adapter 镜像中的非 root 运行用户；如果自行修改 Dockerfile 用户，必须同步调整文件所有权。
+写入上述文件后，将凭据源文件权限限制为 `0400`，目录限制为 `0700`，并按实际容器 UID 核对可读性；当前 API/MCP 使用 UID `10001`，Grafana 使用 UID `472`，Alertmanager 配置应允许其镜像内 UID `65534` 只读。如果自行替换镜像或用户，必须同步调整文件所有权。生产 Compose 会把 Secret 挂载到 `/run/secrets`，不会通过普通环境变量传递；S3、Restic、SMTP 和 Grafana 凭据不得出现在 Git、日志、Trace 或备份清单明文中。
 
 创建 `/data/mem0-runtime/runtime.env`，只保存非敏感的模型配置，并设置为 `root:root`、权限 `0600`：
 
@@ -284,7 +298,7 @@ sudo docker compose \
   up -d --no-build
 ```
 
-参考 Compose 只把服务绑定到回环地址：Mem0 API `127.0.0.1:8888`、MCP Adapter `127.0.0.1:8890`、Dashboard `127.0.0.1:3111`、PostgreSQL `127.0.0.1:8432`。不要为了省略反向代理而把内部端口直接暴露到公网。
+参考 Compose 只把管理服务绑定到回环地址：Mem0 API `127.0.0.1:8888`、MCP Adapter `127.0.0.1:8890`、Dashboard `127.0.0.1:3111`、PostgreSQL `127.0.0.1:8432`、Prometheus `127.0.0.1:9090`、Alertmanager `127.0.0.1:9093` 和 Grafana `127.0.0.1:3001`。Loki、Tempo、OpenTelemetry Collector、导出器与隔离演练数据库只在内部网络可见；不要把这些端口直接暴露到公网。
 
 ### 8. 配置 HTTPS 反向代理
 
@@ -321,6 +335,8 @@ curl --fail https://mem0-api.example.com/api/health
 - Dashboard 能完成管理员初始化并正常登录。
 - Dashboard 的 API Key 页面可以分别创建“管理员 REST API”和“Codex MCP（受限）”两种 Key。
 - 管理员可以打开检索、治理和平台页面，完成一次混合检索、手动备份和恢复预览。
+- Prometheus 能采集 API、MCP、Dashboard、PostgreSQL、备份、配额、Mutation 与投影指标，Grafana 预置面板可见，Alertmanager SMTP 测试邮件送达。
+- Restic 能上传包含控制面库、pgvector 库、History SQLite、配置和脱敏校验清单的快照，并在隔离 PostgreSQL 中完成一次恢复演练。
 - `viewer` 只能读取已分配项目，`editor` 只能修改具有项目编辑权限的记忆，未分配项目和无项目归属记忆不会暴露给普通账户。
 
 在 Dashboard 生成用途为“Codex MCP（受限）”的 Key 后，再继续安装客户端插件。不要把管理员 Key 配置给 Codex。
@@ -338,9 +354,9 @@ curl --fail https://mem0-api.example.com/api/health
 
 平台备份使用 `mem0-self-hosted-backup-v1` 格式，保存记忆、分类和治理设置，默认写入 `/data/mem0-runtime/backups`。单个备份最多包含 100000 条记忆，文件最大 512 MiB；超限时会明确失败，不会静默截断。`merge` 恢复会更新或新增记忆，`replace` 恢复会先生成安全备份并原子替换集合。两种模式都必须先生成恢复预览，并在执行时校验预览哈希。
 
-平台备份不包含用户、API Key、质量反馈、活动记录、后台任务、评测用例或项目权限，不能替代 PostgreSQL 一致性备份，也不能单独用于完整灾难恢复。备份文件和数据库归档都应复制到独立加密介质，并定期验证可恢复性。
+平台 JSON 备份不包含用户、API Key、质量反馈、活动记录、后台任务、评测用例或项目权限，不能替代 PostgreSQL 一致性备份，也不能单独用于完整灾难恢复。生产灾备使用 Restic 客户端加密，同时保存 `mem0_app` 控制面库、`postgres` pgvector 库、History SQLite 一致性快照、运行配置、Secret 和发布清单；默认保留 7 个日备份、4 个周备份、12 个每月备份，并每周在隔离 PostgreSQL 中验证最新快照。恢复演练必须对账记忆数量、正文哈希、项目范围、历史、向量 collection 与孤儿引用。
 
-升级前进入维护模式、停止全部写入，执行同一时间点的 PostgreSQL 与历史 SQLite 一致性备份并记录当前镜像标识。最新治理数据迁移链为 `009 → 010 → 011 → 012 → 013 → 014`，当前 head 为 `014`；Compose 启动时会执行 `alembic upgrade head`。首次升级到包含 `resolve_project_scope` 的版本时，必须先按第 4 步创建并备份 `mcp_project_scope_secret`，否则新 Adapter 会拒绝启动。拉取新提交后，在新的空目录重新物化和测试，构建新的不可变镜像；只有迁移对账、14 工具契约和评测门禁通过后，才更新 `compose.env` 中的三个镜像标识并执行 `docker compose up -d --no-build`。若迁移或上线失败，停止新容器并恢复同一时间点的 PostgreSQL、历史目录和旧镜像标识；禁止只回滚容器而保留新数据库。
+升级前进入维护模式、停止全部写入，生成并上传同一时间点的 PostgreSQL、History、配置、Secret 和平台备份，同时记录 Git SHA、补丁 SHA 与三个镜像 digest。最新治理数据迁移链为 `009 → 010 → 011 → 012 → 013 → 014 → 015 → 016 → 017 → 018`，当前 head 为 `018`；Compose 启动时会执行 `alembic upgrade head`。首次升级到包含 `resolve_project_scope` 的版本时，必须先按第 4 步创建并备份 `mcp_project_scope_secret`，否则新 Adapter 会拒绝启动。拉取新提交后，在新的空目录重新物化和测试；只有迁移往返、数量与正文哈希对账、14 工具契约、评测门禁、镜像漏洞扫描、SBOM、Cosign 签名验证和隔离恢复演练全部通过，才更新 `compose.env` 中的三个不可变镜像 digest 并执行 `docker compose up -d --no-build`。若迁移或上线失败，停止新容器并恢复同一时间点的两个 PostgreSQL 数据库、History、配置、Secret 与旧镜像标识；禁止只回滚容器而保留 `018` 数据库。
 
 仓库不包含生产数据和 Secret，因此只备份 Git 仓库不足以灾难恢复。尤其不能丢失 `mcp_project_scope_secret`，否则无法继续为同一用户和仓库派生原有项目范围。
 
