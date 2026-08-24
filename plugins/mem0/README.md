@@ -1,6 +1,6 @@
 # Mem0 自托管版插件
 
-本目录是市场中的 `mem0` 插件包，包含自托管 MCP、11 个服务端工具、六类 Codex 生命周期钩子和 16 个 Mem0 技能，支持 Windows、Linux 与 macOS。
+本目录是市场中的 `mem0` 插件包，包含自托管 MCP、14 个服务端工具、六类 Codex 生命周期钩子和 16 个 Mem0 技能，支持 Windows、Linux 与 macOS。
 
 ## 运行配置
 
@@ -15,9 +15,9 @@
 
 ## MCP 工具
 
-基础工具为 `add_memory`、`search_memories`、`get_memories`、`get_memory`、`update_memory` 和 `delete_memory`。扩展工具为 `get_memory_history`、`list_entities`、`resolve_project_scope`、`delete_all_memories` 和 `delete_entities`。
+基础工具为 `add_memory`、`search_memories`、`get_memories`、`get_memory`、`update_memory` 和 `delete_memory`。扩展工具为 `get_memory_history`、`list_entities`、`resolve_project_scope`、`delete_all_memories`、`delete_entities`、`list_memory_candidates`、`review_memory_candidate` 和 `submit_memory_feedback`。
 
-服务端支持受限 `messages`、`metadata`、`filters`、`run_id`、过期时间、rerank、分页和历史记录。`list_entities(show_expired=false)` 只返回从受管记忆推导出的项目与运行，不是官方云端实体目录。两个批量删除工具采用“预览 → 用户确认 → 5 分钟 HMAC 令牌执行”，持久化执行进度并对同一令牌幂等收敛，同时在 `.mcp.json` 中默认禁用。
+服务端支持受限 `messages`、`metadata`、`filters`、`run_id`、过期时间、时间有效性、rerank、签名游标分页、候选审核、版本化反馈和历史记录。`list_entities(show_expired=false)` 只返回从受管记忆推导出的项目与运行，不是官方云端实体目录。两个批量删除工具采用“预览 → 用户确认 → 5 分钟 HMAC 令牌执行”，持久化执行进度并对同一令牌幂等收敛，同时在 `.mcp.json` 中默认禁用。
 
 ## 生命周期钩子
 

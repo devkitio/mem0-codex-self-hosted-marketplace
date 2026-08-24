@@ -69,7 +69,7 @@ Dashboard 在基础记忆管理之外提供以下已实现能力：
 
 检索工作台允许 `viewer`、`editor` 和 `admin` 使用，但会自动收窄到当前账户获准访问的项目。冲突检测和敏感信息扫描要求 `editor` 或 `admin`；质量审查、历史恢复、批量维护、Dream、备份恢复、导入、评测、账户和项目权限管理仅允许 `admin`。管理员 REST API Key 不能用于 MCP，MCP 用途 Key 也不能调用这些管理接口。
 
-批量维护和 Dream 都采用“预览 → 哈希确认 → 版本校验 → 执行”，恢复与导入采用“预览 → 哈希确认 → 后台执行”。Dream 部分失败时会先恢复完整执行前快照，再生成新的哈希预览，必须重新确认后才能重试。替换恢复会先创建安全备份，通过 PostgreSQL 临时表完成原子切换；生成向量或写入 staging 失败时不会清空现有集合，切换失败会自动尝试从安全备份回滚。
+批量维护和 Dream 都采用“预览 → 哈希确认 → 版本校验 → 执行”，恢复与导入采用“预览 → 哈希确认 → 后台执行”。Dream 会逐提案回滚失败项并保留成功项，只为失败提案生成新的哈希预览；管理员也可对整次已完成或部分完成的操作执行完整回滚。替换恢复会先创建安全备份，通过 PostgreSQL 临时表完成原子切换；生成向量或写入 staging 失败时不会清空现有集合，切换失败会自动尝试从安全备份回滚。
 
 本次记忆质量闭环没有实现 Webhook，也不会向外部系统发送记忆正文、候选、反馈或治理事件。
 
@@ -577,7 +577,7 @@ python3 plugins/mem0/scripts/mem0_self_hosted.py --check
 
 GitHub Actions 会在 Ubuntu、Windows 和 macOS 上分别执行仓库校验与完整单元测试。
 
-Linux 任务还会安装 `services/mem0-mcp/requirements.lock` 并运行 Adapter 的鉴权、内部接口、真实 ASGI Bearer 链路和实际 `tools/list` 14 工具快照测试；生产 Adapter 的 Dockerfile 与锁定源码均位于 `services/mem0-mcp`。Mem0 服务任务使用隔离 PostgreSQL 验证 `006 → 014 → 006 → 014` 迁移往返、服务测试、Python 统一记忆契约、PGVector 类型过滤、5001 条回填和跨进程恢复。Dashboard 任务使用 Node 22 与 pnpm 10.34.2 执行格式、类型、构建、生产依赖审计和运行镜像健康检查；独立 TypeScript SDK 任务验证持久化 SQLite 历史、共享黄金契约和 PGVector 全文检索配置；三个生产镜像还会分别执行 ARM64 构建验证。
+Linux 任务还会安装 `services/mem0-mcp/requirements.lock` 并运行 Adapter 的鉴权、内部接口、真实 ASGI Bearer 链路和实际 `tools/list` 14 工具快照测试；生产 Adapter 的 Dockerfile 与锁定源码均位于 `services/mem0-mcp`。Mem0 服务任务使用隔离 PostgreSQL 验证 `006 → 018 → 006 → 018` 迁移往返、服务测试、Python 统一记忆契约、PGVector 类型过滤、5001 条回填和跨进程恢复。Dashboard 任务使用 Node 22 与 pnpm 10.34.2 执行格式、类型、构建、Playwright 治理端到端测试、生产依赖审计和运行镜像健康检查；独立 TypeScript SDK 任务验证持久化 SQLite 历史、共享黄金契约和 PGVector 全文检索配置；三个生产镜像还会分别执行 ARM64 构建验证，并在主分支发布时执行 `pip-audit`、Trivy 高危漏洞门禁、Syft SBOM 生成以及基于不可变镜像 digest 的 Cosign keyless 签名和验证。
 
 当前实现还通过以下验收：
 
@@ -589,6 +589,8 @@ Linux 任务还会安装 `services/mem0-mcp/requirements.lock` 并运行 Adapter
 - 风险分级、候选隔离、跨 SDK 黄金契约、版本化反馈、有效使用 Decay、Dream 恢复重试和评测发布门禁测试。
 - 治理检索、项目权限、后台任务取消、5000 条在线治理、100000 条备份容量和 PostgreSQL 原子替换恢复测试。
 - Dashboard 格式、TypeScript 类型、生产构建、依赖审计和 `/api/health` 运行烟测。
+- 时间有效性、LLM 冲突分类、增量投影、别名扩展、置信度与版本化反馈排序、逐阶段检索轨迹和签名游标分页测试。
+- Restic S3 加密备份会同时保存控制面 PostgreSQL 与 pgvector 数据库，并通过隔离恢复演练核对目录、向量 collection、History SQLite 和清单哈希。
 
 ## 许可证与来源
 

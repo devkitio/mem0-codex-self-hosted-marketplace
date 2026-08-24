@@ -72,6 +72,8 @@ jobs:
         run: python -m pip install --require-hashes --requirement services/mem0-mcp/requirements.lock
       - name: 检查依赖一致性
         run: python -m pip check
+      - name: 审计 MCP Python 依赖漏洞
+        run: pipx run pip-audit==2.9.0 --requirement services/mem0-mcp/requirements.lock
       - name: 运行 Adapter 鉴权与工具测试
         working-directory: services/mem0-mcp
         run: python -m unittest -v test_adapter.py
@@ -127,16 +129,18 @@ jobs:
         run: python -m pip install --require-hashes --requirement .mem0-source/server/requirements.lock
       - name: 检查依赖一致性
         run: python -m pip check
+      - name: 审计 Mem0 Python 依赖漏洞
+        run: pipx run pip-audit==2.9.0 --requirement .mem0-source/server/requirements.lock
       - name: 验证数据库迁移往返
         working-directory: .mem0-source/server
         run: |
           alembic upgrade 006
-          alembic upgrade 014
+          alembic upgrade 018
           alembic downgrade 006
-          alembic upgrade 014
+          alembic upgrade 018
       - name: 运行 Mem0 服务单元测试
         working-directory: .mem0-source/server
-        run: python -m unittest -v test_main.py test_self_hosted_features.py test_platform_operations.py
+        run: python -m unittest -v test_main.py test_self_hosted_features.py test_platform_operations.py test_metrics.py
       - name: 运行 Python 统一记忆契约测试
         working-directory: .mem0-source
         env:
@@ -190,6 +194,12 @@ jobs:
       - name: 构建 Dashboard
         working-directory: .mem0-source/server/dashboard
         run: pnpm run build
+      - name: 安装 Playwright Chromium
+        working-directory: .mem0-source/server/dashboard
+        run: pnpm exec playwright install --with-deps chromium
+      - name: 运行 Dashboard 治理端到端测试
+        working-directory: .mem0-source/server/dashboard
+        run: pnpm run test:e2e
       - name: 审计 Dashboard 生产依赖
         working-directory: .mem0-source/server/dashboard
         run: pnpm audit --prod --audit-level=high
@@ -282,3 +292,87 @@ jobs:
           file: ${{ matrix.file }}
           platforms: linux/arm64
           push: false
+
+  supply-chain-release:
+    name: 扫描、生成 SBOM 并签名生产镜像
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    outputs:
+      api-image: ${{ steps.publish.outputs.api_ref }}
+      mcp-image: ${{ steps.publish.outputs.mcp_ref }}
+      dashboard-image: ${{ steps.publish.outputs.dashboard_ref }}
+    env:
+      TRIVY_IMAGE: aquasec/trivy:0.68.2@sha256:05d0126976bdedcd0782a0336f77832dbea1c81b9cc5e4b3a5ea5d2ec863aca7
+      SYFT_IMAGE: anchore/syft:v1.38.0@sha256:825cad3a952c87676a6d07e9a3bb05ac9c401d598360070e970aa46d54c1727e
+      COSIGN_IMAGE: ghcr.io/sigstore/cosign/cosign:v2.6.1@sha256:68839b7f13dac5a6744a5d8818e984dd39183374e37855c19e14d623d9bc9037
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: 设置 Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.12"
+      - name: 物化固定 Mem0 源码
+        run: python scripts/materialize_mem0.py .mem0-source
+      - name: Trivy 扫描仓库文件系统
+        run: >-
+          docker run --rm -v "$PWD:/workspace:ro" "$TRIVY_IMAGE"
+          fs --exit-code 1 --severity HIGH,CRITICAL --scanners vuln,secret,misconfig /workspace
+      - name: 登录 GitHub Container Registry
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: echo "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+      - name: 构建并推送三个生产镜像
+        id: publish
+        run: |
+          set -euo pipefail
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          api="ghcr.io/${owner}/mem0-api:${GITHUB_SHA}"
+          mcp="ghcr.io/${owner}/mem0-mcp:${GITHUB_SHA}"
+          dashboard="ghcr.io/${owner}/mem0-dashboard:${GITHUB_SHA}"
+          docker build --file .mem0-source/server/prod.Dockerfile --tag "$api" .mem0-source
+          docker build --file services/mem0-mcp/Dockerfile --tag "$mcp" services/mem0-mcp
+          docker build --file .mem0-source/server/dashboard/Dockerfile --tag "$dashboard" .mem0-source/server/dashboard
+          docker push "$api"
+          docker push "$mcp"
+          docker push "$dashboard"
+          for component in api mcp dashboard; do
+            case "$component" in
+              api) image="$api" ;;
+              mcp) image="$mcp" ;;
+              dashboard) image="$dashboard" ;;
+            esac
+            digest_ref="$(docker image inspect --format '{{index .RepoDigests 0}}' "$image")"
+            case "$digest_ref" in
+              *@sha256:*) ;;
+              *) echo "无法解析 ${component} 镜像摘要" >&2; exit 1 ;;
+            esac
+            echo "${component}_ref=${digest_ref}" >> "$GITHUB_OUTPUT"
+            echo "- ${component}: \`${digest_ref}\`" >> "$GITHUB_STEP_SUMMARY"
+          done
+      - name: Trivy 镜像门禁、Syft SBOM 与 Cosign keyless 签名
+        run: |
+          set -euo pipefail
+          identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/validate.yml@refs/heads/main"
+          for component in api mcp dashboard; do
+            case "$component" in
+              api) image='${{ steps.publish.outputs.api_ref }}' ;;
+              mcp) image='${{ steps.publish.outputs.mcp_ref }}' ;;
+              dashboard) image='${{ steps.publish.outputs.dashboard_ref }}' ;;
+            esac
+            case "$image" in
+              *@sha256:*) ;;
+              *) echo "${component} 未使用不可变镜像摘要" >&2; exit 1 ;;
+            esac
+            docker run --rm -v "$HOME/.docker:/root/.docker:ro" "$TRIVY_IMAGE" image --exit-code 1 --severity HIGH,CRITICAL "$image"
+            docker run --rm -v "$HOME/.docker:/root/.docker:ro" -v "$PWD:/workspace" "$SYFT_IMAGE" "$image" -o "spdx-json=/workspace/sbom-${component}.spdx.json"
+            docker run --rm -v "$HOME/.docker:/root/.docker:ro" -v "$PWD:/workspace:ro" -e ACTIONS_ID_TOKEN_REQUEST_TOKEN -e ACTIONS_ID_TOKEN_REQUEST_URL "$COSIGN_IMAGE" attest --yes --type spdxjson --predicate "/workspace/sbom-${component}.spdx.json" "$image"
+            docker run --rm -v "$HOME/.docker:/root/.docker:ro" -e ACTIONS_ID_TOKEN_REQUEST_TOKEN -e ACTIONS_ID_TOKEN_REQUEST_URL "$COSIGN_IMAGE" sign --yes "$image"
+            docker run --rm -v "$HOME/.docker:/root/.docker:ro" "$COSIGN_IMAGE" verify --certificate-identity "$identity" --certificate-oidc-issuer https://token.actions.githubusercontent.com "$image"
+            docker run --rm -v "$HOME/.docker:/root/.docker:ro" "$COSIGN_IMAGE" verify-attestation --type spdxjson --certificate-identity "$identity" --certificate-oidc-issuer https://token.actions.githubusercontent.com "$image"
+          done
