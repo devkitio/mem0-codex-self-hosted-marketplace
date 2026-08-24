@@ -114,14 +114,15 @@
       "annotations": {"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false}
     },
     "list_memory_candidates": {
-      "properties": ["limit", "project_id", "status"],
+      "properties": ["cursor", "limit", "project_id", "status"],
       "required": [],
       "types": {
+        "cursor": ["null", "string"],
         "limit": ["integer"],
         "project_id": ["null", "string"],
         "status": ["null", "string"]
       },
-      "defaults": {"limit": 50, "project_id": null, "status": "pending"},
+      "defaults": {"cursor": null, "limit": 50, "project_id": null, "status": "pending"},
       "enums": {"status": ["pending", "promoted", "rejected", "archived"]},
       "annotations": {"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false}
     },
@@ -148,28 +149,34 @@
       "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": false, "openWorldHint": false}
     },
     "search_memories": {
-      "properties": ["explain", "filters", "project_id", "query", "rerank", "show_expired", "threshold", "top_k"],
+      "properties": ["as_of", "explain", "filters", "include_ranking_trace", "project_id", "query", "rerank", "show_expired", "threshold", "top_k", "validity_mode"],
       "required": ["query"],
       "types": {
+        "as_of": ["null", "string"],
         "explain": ["boolean"],
         "filters": ["null", "object"],
+        "include_ranking_trace": ["boolean"],
         "project_id": ["null", "string"],
         "query": ["string"],
         "rerank": ["boolean"],
         "show_expired": ["boolean"],
         "threshold": ["null", "number"],
-        "top_k": ["integer"]
+        "top_k": ["integer"],
+        "validity_mode": ["string"]
       },
       "defaults": {
+        "as_of": null,
         "explain": false,
         "filters": null,
+        "include_ranking_trace": false,
         "project_id": null,
         "rerank": false,
         "show_expired": false,
         "threshold": null,
-        "top_k": 10
+        "top_k": 10,
+        "validity_mode": "current"
       },
-      "enums": {},
+      "enums": {"validity_mode": ["current", "as_of"]},
       "annotations": {"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false}
     },
     "submit_memory_feedback": {

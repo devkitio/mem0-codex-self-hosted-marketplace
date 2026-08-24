@@ -254,6 +254,18 @@ class AdapterAsyncTests(unittest.IsolatedAsyncioTestCase):
 
         async def handler(request):
             self.requests.append(request)
+            if request.url.path == "/quota-once" and sum(
+                item.url.path == "/quota-once" for item in self.requests
+            ) == 1:
+                return httpx.Response(
+                    429,
+                    headers={"Retry-After": "0", "X-Quota-Scope": "search"},
+                )
+            if request.url.path == "/quota-always":
+                return httpx.Response(
+                    429,
+                    headers={"Retry-After": "7", "X-Quota-Scope": "write"},
+                )
             if request.url.path == "/auth/introspect":
                 supplied = request.headers.get("X-API-Key")
                 if supplied == TEST_API_KEY:
@@ -346,6 +358,33 @@ class AdapterAsyncTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ValueError, "Mem0 拒绝请求") as raised:
             await server._request("GET", "/bad", internal=True)
         self.assertNotIn("不得泄露", str(raised.exception))
+
+    async def test_request_retries_quota_once_with_same_correlation_id(self):
+        result = await server._request(
+            "GET", "/quota-once", internal=True, retryable=True
+        )
+        requests = [item for item in self.requests if item.url.path == "/quota-once"]
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(len(requests), 2)
+        self.assertEqual(
+            requests[0].headers["X-Correlation-ID"],
+            requests[1].headers["X-Correlation-ID"],
+        )
+        self.assertEqual(result["correlation_id"], requests[0].headers["X-Correlation-ID"])
+
+    async def test_request_exposes_retry_after_after_retry_is_exhausted(self):
+        with self.assertRaises(server.UpstreamQuotaError) as raised:
+            await server._request(
+                "GET", "/quota-always", internal=True, retryable=True
+            )
+        requests = [item for item in self.requests if item.url.path == "/quota-always"]
+        self.assertEqual(len(requests), 2)
+        self.assertEqual(raised.exception.retry_after, 7)
+        self.assertEqual(raised.exception.scope, "write")
+        self.assertEqual(
+            raised.exception.correlation_id,
+            requests[0].headers["X-Correlation-ID"],
+        )
 
     async def test_mem0_api_key_verifier_accepts_only_mcp_keys(self):
         verifier = server.Mem0APIKeyVerifier()
@@ -593,6 +632,9 @@ class AdapterAsyncTests(unittest.IsolatedAsyncioTestCase):
                 project_id="project-a",
                 filters={"metadata": {"kind": "decision"}},
                 rerank=True,
+                validity_mode="as_of",
+                as_of="2026-08-24T12:00:00+08:00",
+                include_ranking_trace=True,
             )
         self.assertEqual([row["id"] for row in result["results"]], [item["id"]])
         self.assertEqual(request.await_count, 1)
@@ -600,6 +642,9 @@ class AdapterAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["project_id"], "project-a")
         self.assertTrue(payload["rerank"])
         self.assertEqual(payload["filters"], {"metadata": {"kind": "decision"}})
+        self.assertEqual(payload["validity_mode"], "as_of")
+        self.assertEqual(payload["as_of"], "2026-08-24T12:00:00+08:00")
+        self.assertTrue(payload["include_ranking_trace"])
         self.assertEqual(request.await_args.args, ("POST", "/internal/mcp/search"))
         self.assertTrue(request.await_args.kwargs["internal"])
         self.assertEqual(request.await_args.kwargs["timeout_seconds"], server.READ_TIMEOUT)
@@ -873,9 +918,14 @@ class AdapterAsyncTests(unittest.IsolatedAsyncioTestCase):
         }
         request = AsyncMock(return_value=valid)
         with patch.object(server, "_request", request):
-            result = await server.list_memory_candidates(project_id="project-a", limit=250)
+            result = await server.list_memory_candidates(
+                project_id="project-a", limit=250, cursor="signed-cursor"
+            )
         self.assertEqual(result["count"], 1)
-        self.assertEqual(request.await_args.kwargs["json_body"]["limit"], 100)
+        self.assertEqual(request.await_args.kwargs["json_body"]["limit"], 200)
+        self.assertEqual(
+            request.await_args.kwargs["json_body"]["cursor"], "signed-cursor"
+        )
 
         out_of_scope = {
             "results": [

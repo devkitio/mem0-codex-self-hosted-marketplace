@@ -125,6 +125,16 @@ MEMORY_RESPONSE_FIELDS = {
     "hash",
     "score",
     "score_details",
+    "semantic_score",
+    "hybrid_score",
+    "rerank_score",
+    "feedback_factor",
+    "confidence_factor",
+    "decay_factor",
+    "final_score",
+    "validity_status",
+    "query_expansions",
+    "ranking_stages",
     "created_at",
     "updated_at",
     "expiration_date",
@@ -140,6 +150,16 @@ CLEAN_MEMORY_FIELDS = {
     "expiration_date",
     "score",
     "score_details",
+    "semantic_score",
+    "hybrid_score",
+    "rerank_score",
+    "feedback_factor",
+    "confidence_factor",
+    "decay_factor",
+    "final_score",
+    "validity_status",
+    "query_expansions",
+    "ranking_stages",
 }
 FILTER_FIELDS = {"metadata", "run_id", "created_at", "updated_at", "expiration_date"}
 FILTER_LOGICAL = {"AND", "OR", "NOT"}
@@ -152,6 +172,19 @@ _validate_runtime_secrets(INTERNAL_SERVICE_KEY, CONFIRMATION_SECRET, PROJECT_SCO
 
 class InvalidMem0APIKey(ValueError):
     pass
+
+
+class UpstreamQuotaError(RuntimeError):
+    def __init__(self, retry_after: int, scope: str, correlation_id: str) -> None:
+        super().__init__("Mem0 请求超过配额，请稍后重试")
+        self.retry_after = retry_after
+        self.scope = scope
+        self.correlation_id = correlation_id
+
+
+class _RetryableUpstream(RuntimeError):
+    def __init__(self, delay: float) -> None:
+        self.delay = delay
 
 
 @asynccontextmanager
@@ -653,6 +686,9 @@ async def _request(
     public: bool = False,
     timeout_seconds: float | None = None,
     max_response_bytes: int | None = None,
+    retryable: bool = False,
+    _attempt: int = 0,
+    _correlation_id: str | None = None,
 ) -> Any:
     client = HTTP_CLIENT
     semaphore = UPSTREAM_SEMAPHORE
@@ -660,7 +696,8 @@ async def _request(
         raise RuntimeError("MCP 上游客户端尚未就绪")
     if sum((bool(internal), api_key is not None, bool(public))) != 1:
         raise RuntimeError("Mem0 上游认证模式冲突")
-    headers = {"Accept": "application/json"}
+    correlation_id = _correlation_id or uuid.uuid4().hex
+    headers = {"Accept": "application/json", "X-Correlation-ID": correlation_id}
     if internal:
         headers["X-Mem0-Internal-Key"] = INTERNAL_SERVICE_KEY
     elif api_key is not None:
@@ -692,6 +729,21 @@ async def _request(
                         raise InvalidMem0APIKey("Mem0 API Key 无效或用途不匹配")
                     if response.status_code in (400, 404, 409, 422):
                         raise ValueError(f"Mem0 拒绝请求（{response.status_code}）")
+                    if response.status_code == 429:
+                        raw_retry_after = response.headers.get("Retry-After", "1")
+                        try:
+                            retry_after = max(0, min(int(float(raw_retry_after)), 60))
+                        except ValueError:
+                            retry_after = 1
+                        if retryable and _attempt < 1:
+                            raise _RetryableUpstream(min(float(retry_after), 2.0))
+                        raise UpstreamQuotaError(
+                            retry_after,
+                            response.headers.get("X-Quota-Scope", "upstream"),
+                            correlation_id,
+                        )
+                    if response.status_code >= 500 and retryable and _attempt < 1:
+                        raise _RetryableUpstream(0.25)
                     raise RuntimeError(f"Mem0 上游错误（{response.status_code}）")
                 content_length = response.headers.get("content-length")
                 if content_length:
@@ -708,6 +760,22 @@ async def _request(
                 status_code = response.status_code
         finally:
             semaphore.release()
+    except _RetryableUpstream as exc:
+        await asyncio.sleep(exc.delay)
+        return await _request(
+            method,
+            path,
+            params=params,
+            json_body=json_body,
+            internal=internal,
+            api_key=api_key,
+            public=public,
+            timeout_seconds=timeout_seconds,
+            max_response_bytes=max_response_bytes,
+            retryable=retryable,
+            _attempt=_attempt + 1,
+            _correlation_id=correlation_id,
+        )
     except httpx.TimeoutException as exc:
         raise RuntimeError("Mem0 上游请求超时") from exc
     except httpx.HTTPError as exc:
@@ -715,7 +783,10 @@ async def _request(
     if status_code == 204 or not body:
         return None
     try:
-        return json.loads(body, parse_constant=_reject_json_constant)
+        decoded = json.loads(body, parse_constant=_reject_json_constant)
+        if isinstance(decoded, dict):
+            decoded.setdefault("correlation_id", correlation_id)
+        return decoded
     except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
         raise RuntimeError("Mem0 上游返回无效 JSON") from exc
 
@@ -739,6 +810,7 @@ async def _internal_memory_action(
         json_body=payload,
         internal=True,
         timeout_seconds=READ_TIMEOUT if action in {"get", "history"} else TIMEOUT,
+        retryable=action in {"get", "history"},
     )
     if not isinstance(data, dict):
         raise RuntimeError("Mem0 内部记忆操作返回无效响应")
@@ -801,6 +873,7 @@ async def _internal_query(
         json_body=payload,
         internal=True,
         timeout_seconds=READ_TIMEOUT,
+        retryable=True,
     )
     if not isinstance(data, dict):
         raise RuntimeError("Mem0 内部查询返回无效响应")
@@ -858,6 +931,7 @@ async def _internal_entities(
         },
         internal=True,
         timeout_seconds=READ_TIMEOUT,
+        retryable=True,
     )
     if not isinstance(data, dict):
         raise RuntimeError("Mem0 内部实体查询返回无效响应")
@@ -1144,12 +1218,24 @@ async def search_memories(
     rerank: bool = False,
     explain: bool = False,
     show_expired: bool = False,
+    validity_mode: Literal["current", "as_of"] = "current",
+    as_of: str | None = None,
+    include_ranking_trace: bool = False,
 ) -> dict[str, Any]:
     """语义搜索受管记忆；项目搜索同时包含当前项目与全局记忆。"""
     query = _text(query, MAX_QUERY, "query")
     project_id = _project(project_id)
     caller_filters = _filters(filters)
     top_k = max(1, min(int(top_k), MAX_TOP_K))
+    if validity_mode not in {"current", "as_of"}:
+        raise ValueError("validity_mode 必须是 current 或 as_of")
+    if validity_mode == "as_of":
+        if not as_of:
+            raise ValueError("as_of 模式必须提供时间点")
+        try:
+            datetime.fromisoformat(as_of.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValueError("as_of 必须是 ISO-8601 时间") from exc
     payload: dict[str, Any] = {
         "query": query,
         "project_id": project_id,
@@ -1158,6 +1244,9 @@ async def search_memories(
         "explain": bool(explain),
         "show_expired": bool(show_expired),
         "filters": caller_filters,
+        "validity_mode": validity_mode,
+        "as_of": as_of,
+        "include_ranking_trace": bool(include_ranking_trace),
     }
     if threshold is not None:
         if not 0 <= float(threshold) <= 1:
@@ -1169,6 +1258,7 @@ async def search_memories(
         json_body=payload,
         internal=True,
         timeout_seconds=READ_TIMEOUT,
+        retryable=True,
     )
     rows = _memory_rows(
         data,
@@ -1185,6 +1275,8 @@ async def search_memories(
         "retrieval_mode": data.get("retrieval_mode", "hybrid"),
         "status": data.get("status", "ok" if rows else "no_results"),
         "error": data.get("error"),
+        "ranking_trace_id": data.get("ranking_trace_id"),
+        "correlation_id": data.get("correlation_id"),
     }
 
 
@@ -1195,19 +1287,21 @@ async def list_memory_candidates(
     project_id: str | None = None,
     status: Literal["pending", "promoted", "rejected", "archived"] | None = "pending",
     limit: int = 50,
+    cursor: str | None = None,
 ) -> dict[str, Any]:
     """列出当前 MCP 项目作用域内的候选记忆，供用户审核自动提取结果。"""
     project_id = _project(project_id)
     allowed_statuses = {"pending", "promoted", "rejected", "archived"}
     if status is not None and status not in allowed_statuses:
         raise ValueError("status 必须是 pending、promoted、rejected 或 archived")
-    limit = max(1, min(int(limit), 100))
+    limit = max(1, min(int(limit), 200))
     data = await _request(
         "POST",
         "/internal/mcp/candidates",
-        json_body={"project_id": project_id, "status": status, "limit": limit},
+        json_body={"project_id": project_id, "status": status, "limit": limit, "cursor": cursor},
         internal=True,
         timeout_seconds=READ_TIMEOUT,
+        retryable=True,
     )
     rows = _result_rows(data, "候选记忆查询")
     for row in rows:
@@ -1217,7 +1311,12 @@ async def list_memory_candidates(
             raise RuntimeError("Mem0 候选记忆查询返回无效响应") from exc
         if row.get("project_id") != project_id or row.get("status") not in allowed_statuses:
             raise RuntimeError("Mem0 候选记忆查询返回越界结果")
-    return {"results": rows, "count": len(rows)}
+    return {
+        "results": rows,
+        "count": data.get("count", len(rows)),
+        "page_info": data.get("page_info") or {"next_cursor": None, "has_more": False, "total": len(rows)},
+        "correlation_id": data.get("correlation_id"),
+    }
 
 
 @mcp.tool(
@@ -1237,6 +1336,8 @@ async def review_memory_candidate(
         raise ValueError("action 必须是 confirm、reject 或 edit")
     if action == "edit" and text is None:
         raise ValueError("编辑候选记忆时必须提供 text")
+    if action == "reject" and (reason is None or not reason.strip()):
+        raise ValueError("拒绝候选记忆时必须提供 reason")
     payload = {
         "candidate_id": candidate_id,
         "project_id": project_id,
@@ -1468,6 +1569,7 @@ async def _readiness_response() -> JSONResponse:
             public=True,
             timeout_seconds=3.0,
             max_response_bytes=32768,
+            retryable=True,
         )
         if not isinstance(data, dict) or data.get("status") != "ok":
             raise RuntimeError("Mem0 上游未就绪")
