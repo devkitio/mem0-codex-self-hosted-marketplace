@@ -3,5 +3,5 @@
   "repository": "https://github.com/mem0ai/mem0.git",
   "commit": "50bdaaea0c02744720ed374d88584fd01494eeb7",
   "patch": "mem0-production.patch",
-  "patch_sha256": "16b02d9806cff74456cb6df56561c6dfc0618e28afd0b796efa9d1b8c87baf10"
+  "patch_sha256": "86c82b712a5b9a22394e97cd5448b30cff03abf417b80943cf9de3c0b1c12678"
 }
