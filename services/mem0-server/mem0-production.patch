@@ -3016,7 +3016,7 @@ index 1f9148c7b5e1bcefbd63a00d1a11953c8e5d81ac..fbb135980c882f96dee5a42881d09bac
 +/playwright-report
 +/test-results
 diff --git a/server/dashboard/Dockerfile b/server/dashboard/Dockerfile
-index 0f271e1ee44e61d156f9c789937cebde371381a1..cc7db182e3e124dd86f82b82f68faf5b69370b44 100644
+index 0f271e1ee44e61d156f9c789937cebde371381a1..0cc17710f8a0df731b1e0299ca96a5116aa385cb 100644
 --- a/server/dashboard/Dockerfile
 +++ b/server/dashboard/Dockerfile
 @@ -1,2 +1,2 @@
@@ -3051,13 +3051,16 @@ index 0f271e1ee44e61d156f9c789937cebde371381a1..cc7db182e3e124dd86f82b82f68faf5b
 @@ -26 +24 @@ ENV NEXT_PUBLIC_INSTANCE_NAME=NEXT_PUBLIC_INSTANCE_NAME
 -RUN npm run build
 +RUN pnpm run build
-@@ -28,2 +26,3 @@ RUN npm run build
+@@ -28,2 +26,6 @@ RUN npm run build
 -# Production
 -FROM base AS runner
 +# 运行时镜像保持为目标平台，构建阶段则使用原生平台以避免 QEMU 执行 Node.js
 +FROM node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32 AS runner
-+RUN apk upgrade --no-cache && apk add --no-cache libc6-compat
-@@ -38 +37 @@ RUN addgroup --system --gid 1001 nodejs && \
++# 运行阶段只执行 node server.js，移除不需要且会扩大漏洞面的 npm/npx。
++RUN apk upgrade --no-cache && \
++    apk add --no-cache libc6-compat && \
++    rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
+@@ -38 +40 @@ RUN addgroup --system --gid 1001 nodejs && \
 -COPY --from=builder /app/public ./public
 +COPY --from=builder --chown=nextjs:nodejs /app/public ./public
 diff --git a/server/dashboard/e2e/governance-v3.spec.ts b/server/dashboard/e2e/governance-v3.spec.ts
