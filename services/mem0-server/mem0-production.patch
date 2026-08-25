@@ -1496,7 +1496,7 @@ index 0000000000000000000000000000000000000000..148b54a1ab03c46165695e5893cd7d7d
 +limit_req_zone $binary_remote_addr zone=mem0_api_perip:10m rate=10r/s;
 +limit_req_zone $binary_remote_addr zone=mem0_login_perip:10m rate=10r/m;
 diff --git a/server/.env.example b/server/.env.example
-index 3e44034ad5beec72965a90ce9671509b87f6a36d..835d76c9f94be3097d666267bcadcaede0e48691 100644
+index 3e44034ad5beec72965a90ce9671509b87f6a36d..4cf3a18eb290bc822257e7f1f4d76f0f2970af2f 100644
 --- a/server/.env.example
 +++ b/server/.env.example
 @@ -1 +1,8 @@
@@ -1519,8 +1519,16 @@ index 3e44034ad5beec72965a90ce9671509b87f6a36d..835d76c9f94be3097d666267bcadcaed
 +MEM0_DASHBOARD_IMAGE=mem0-local/mem0-dashboard:<发布标识>
 +MEM0_MCP_ROOT=/data/mem0Mcp
 +MEM0_RUNTIME_ROOT=/data/mem0-runtime
-@@ -7 +17,28 @@ OPENAI_API_KEY=
+@@ -7 +17,36 @@ OPENAI_API_KEY=
 -# Postgres — POSTGRES_PASSWORD is required; docker-compose will not start without it.
++# 下列能力均为选配。基础 Compose 不需要 S3、SMTP 或 Grafana Secret。
++# S3 灾备：叠加 docker-compose.dr.yaml，并在 Dashboard 的“备份恢复”中启用。
++# 监控栈：叠加 docker-compose.observability.yaml；Grafana 只绑定回环地址。
++# 邮件告警：在监控栈基础上再叠加 docker-compose.smtp.yaml。
++GRAFANA_HOST_PORT=3001
++PROMETHEUS_HOST_PORT=9090
++ALERTMANAGER_HOST_PORT=9093
++
 +# 生产身份必须稳定且由部署者显式指定；开始写入数据后不要修改。
 +MEM0_INTERNAL_USER_ID=mem0-user
 +MEM0_INTERNAL_OWNER=mem0-mcp-adapter
@@ -1549,16 +1557,16 @@ index 3e44034ad5beec72965a90ce9671509b87f6a36d..835d76c9f94be3097d666267bcadcaed
 +MODEL_GATEWAY_NETWORK_NAME=model-gateway
 +
 +# PostgreSQL。直接运行时必须设置密码；生产 Compose 改从 secret 文件读取。
-@@ -13 +50,4 @@ POSTGRES_PASSWORD=
+@@ -13 +58,4 @@ POSTGRES_PASSWORD=
 -POSTGRES_COLLECTION_NAME=memories
 +POSTGRES_COLLECTION_NAME=memories_1024
 +PGVECTOR_FTS_LANGUAGE=simple
 +PGVECTOR_FTS_PHRASE_SEARCH=false
 +PGVECTOR_FTS_FIELD_WEIGHTS={"text_lemmatized":"A","data":"B","categories":"C","memory_type":"D"}
-@@ -17 +57 @@ JWT_SECRET=
+@@ -17 +65 @@ JWT_SECRET=
 -# Local development only. Leave false in production.
 +# 仅本地开发可启用；生产环境必须保持 false。
-@@ -22,9 +62,2 @@ APP_DB_NAME=mem0_app
+@@ -22,9 +70,2 @@ APP_DB_NAME=mem0_app
 -# Default LLM and embedder models. Provider must be in BUNDLED_*_PROVIDERS
 -# (see server/main.py). Override to pin a specific model without editing code.
 -MEM0_DEFAULT_LLM_MODEL=gpt-5-mini
@@ -1570,7 +1578,7 @@ index 3e44034ad5beec72965a90ce9671509b87f6a36d..835d76c9f94be3097d666267bcadcaed
 -MEM0_TELEMETRY=true
 +# 自托管生产环境默认关闭匿名遥测。
 +MEM0_TELEMETRY=false
-@@ -32,2 +65 @@ MEM0_TELEMETRY=true
+@@ -32,2 +73 @@ MEM0_TELEMETRY=true
 -# Days of request_logs history to keep when `make prune-logs` runs.
 -# Wire the prune command into cron/systemd in production.
 +# 请求日志保留天数；生产环境需定期执行清理脚本。
@@ -14943,10 +14951,10 @@ index a7419ca5dfb01dfb6e04586b4940ee06790e03c8..c7a42c239984ff7f056de62d91b58359
 +const MEMORY_FETCH_LIMIT = 5000;
 diff --git a/server/dashboard/src/app/(root)/dashboard/platform/page.tsx b/server/dashboard/src/app/(root)/dashboard/platform/page.tsx
 new file mode 100644
-index 0000000000000000000000000000000000000000..0ff1fbf78d9e85943f2a55f66c5d89997baeb9f8
+index 0000000000000000000000000000000000000000..1e58e5a7d693117e4efe14099e6706668c2093a5
 --- /dev/null
 +++ b/server/dashboard/src/app/(root)/dashboard/platform/page.tsx
-@@ -0,0 +1,2145 @@
+@@ -0,0 +1,2245 @@
 +"use client";
 +
 +import { ChangeEvent, useCallback, useEffect, useState } from "react";
@@ -15009,6 +15017,10 @@ index 0000000000000000000000000000000000000000..0ff1fbf78d9e85943f2a55f66c5d8999
 +  backup_enabled: boolean;
 +  backup_interval_hours: number;
 +  backup_retention: number;
++  disaster_recovery_enabled: boolean;
++  disaster_recovery_interval_hours: number;
++  restore_drill_enabled: boolean;
++  restore_drill_interval_days: number;
 +}
 +
 +interface PreviewState {
@@ -15020,6 +15032,9 @@ index 0000000000000000000000000000000000000000..0ff1fbf78d9e85943f2a55f66c5d8999
 +
 +interface DisasterRecoveryStatus {
 +  configured: boolean;
++  enabled: boolean;
++  restore_drill_enabled: boolean;
++  missing: string[];
 +  latest: Record<"backup" | "restore_drill", DisasterRecoveryRun | null>;
 +  rpo_hours: number;
 +  rto_target_hours: number;
@@ -15082,6 +15097,10 @@ index 0000000000000000000000000000000000000000..0ff1fbf78d9e85943f2a55f66c5d8999
 +  backup_enabled: true,
 +  backup_interval_hours: 24,
 +  backup_retention: 14,
++  disaster_recovery_enabled: false,
++  disaster_recovery_interval_hours: 24,
++  restore_drill_enabled: false,
++  restore_drill_interval_days: 7,
 +};
 +
 +const jobLabels: Record<string, string> = {
@@ -15378,6 +15397,7 @@ index 0000000000000000000000000000000000000000..0ff1fbf78d9e85943f2a55f66c5d8999
 +    setSavingSettings(true);
 +    try {
 +      await api.put(PLATFORM_ENDPOINTS.SETTINGS, settings);
++      await loadDisasterRecovery();
 +      toast({ title: "平台设置已保存", variant: "success" });
 +    } catch (error) {
 +      toast({
@@ -16050,18 +16070,94 @@ index 0000000000000000000000000000000000000000..0ff1fbf78d9e85943f2a55f66c5d8999
 +                <span>S3 异地灾备</span>
 +                <Badge
 +                  variant={
++                    !settings.disaster_recovery_enabled ||
 +                    disasterRecoveryStatus?.configured
 +                      ? "secondary"
 +                      : "destructive"
 +                  }
 +                >
-+                  {disasterRecoveryStatus?.configured
-+                    ? "已配置"
-+                    : "缺少生产 Secret"}
++                  {!settings.disaster_recovery_enabled
++                    ? "已关闭（选配）"
++                    : disasterRecoveryStatus?.configured
++                      ? "已启用"
++                      : "待配置"}
 +                </Badge>
 +              </CardTitle>
 +            </CardHeader>
 +            <CardContent className="space-y-4">
++              <div className="grid gap-3 sm:grid-cols-2">
++                <label className="flex items-center justify-between gap-3 rounded border p-3 text-sm">
++                  启用 S3 异地灾备
++                  <Switch
++                    checked={settings.disaster_recovery_enabled}
++                    onCheckedChange={(value) =>
++                      setSettings({
++                        ...settings,
++                        disaster_recovery_enabled: value,
++                        restore_drill_enabled: value
++                          ? settings.restore_drill_enabled
++                          : false,
++                      })
++                    }
++                  />
++                </label>
++                <label className="flex items-center justify-between gap-3 rounded border p-3 text-sm">
++                  启用每周恢复演练
++                  <Switch
++                    checked={settings.restore_drill_enabled}
++                    disabled={!settings.disaster_recovery_enabled}
++                    onCheckedChange={(value) =>
++                      setSettings({
++                        ...settings,
++                        restore_drill_enabled: value,
++                      })
++                    }
++                  />
++                </label>
++              </div>
++              <div className="grid gap-3 sm:grid-cols-2">
++                <div className="space-y-1.5">
++                  <Label>异地备份间隔（小时）</Label>
++                  <Input
++                    type="number"
++                    min={1}
++                    max={720}
++                    disabled={!settings.disaster_recovery_enabled}
++                    value={settings.disaster_recovery_interval_hours}
++                    onChange={(event) =>
++                      setSettings({
++                        ...settings,
++                        disaster_recovery_interval_hours: Number(
++                          event.target.value,
++                        ),
++                      })
++                    }
++                  />
++                </div>
++                <div className="space-y-1.5">
++                  <Label>恢复演练间隔（天）</Label>
++                  <Input
++                    type="number"
++                    min={1}
++                    max={90}
++                    disabled={!settings.restore_drill_enabled}
++                    value={settings.restore_drill_interval_days}
++                    onChange={(event) =>
++                      setSettings({
++                        ...settings,
++                        restore_drill_interval_days: Number(event.target.value),
++                      })
++                    }
++                  />
++                </div>
++              </div>
++              {settings.disaster_recovery_enabled &&
++                !disasterRecoveryStatus?.configured && (
++                  <p className="text-xs text-onSurface-warning-primary">
++                    功能已启用，但服务器尚未提供完整 S3 与 Restic
++                    Secret；配置完成前不会创建自动或手动灾备任务。
++                  </p>
++                )}
 +              <div className="grid gap-3 text-sm sm:grid-cols-2">
 +                <div className="rounded bg-surface-default-secondary p-3">
 +                  目标 RPO：{disasterRecoveryStatus?.rpo_hours ?? 24} 小时
@@ -16073,7 +16169,11 @@ index 0000000000000000000000000000000000000000..0ff1fbf78d9e85943f2a55f66c5d8999
 +              <div className="flex flex-wrap gap-2">
 +                <Button
 +                  onClick={() => createDisasterRecovery("backup")}
-+                  disabled={busy || !disasterRecoveryStatus?.configured}
++                  disabled={
++                    busy ||
++                    !settings.disaster_recovery_enabled ||
++                    !disasterRecoveryStatus?.configured
++                  }
 +                >
 +                  <DatabaseBackup className="mr-1.5 size-4" />
 +                  立即上传 S3
@@ -16083,6 +16183,7 @@ index 0000000000000000000000000000000000000000..0ff1fbf78d9e85943f2a55f66c5d8999
 +                  onClick={() => createDisasterRecovery("restore_drill")}
 +                  disabled={
 +                    busy ||
++                    !settings.restore_drill_enabled ||
 +                    !disasterRecoveryStatus?.configured ||
 +                    !disasterRecoveryStatus?.latest?.backup
 +                  }
@@ -16091,6 +16192,13 @@ index 0000000000000000000000000000000000000000..0ff1fbf78d9e85943f2a55f66c5d8999
 +                  隔离恢复演练
 +                </Button>
 +              </div>
++              <Button
++                variant="outline"
++                onClick={saveSettings}
++                disabled={savingSettings}
++              >
++                {savingSettings ? "保存中…" : "保存灾备设置"}
++              </Button>
 +              {disasterRecoveryRuns.map((item) => (
 +                <div key={item.id} className="rounded border p-3 text-sm">
 +                  <div className="flex flex-wrap items-center justify-between gap-2">
@@ -18665,10 +18773,10 @@ index a142374b083af5e919d1ded7e2f83392652eccf7..5f271bff6aa20f9b334db3cd8823f767
 +    return _build_database_url().render_as_string(hide_password=False)
 diff --git a/server/disaster_recovery_service.py b/server/disaster_recovery_service.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..48b1aa59f0a08eeb26aae88dc5ae359c2803229a
+index 0000000000000000000000000000000000000000..83f34d8b06c9ebc77fb86c0972cc6cc1e95d4b36
 --- /dev/null
 +++ b/server/disaster_recovery_service.py
-@@ -0,0 +1,477 @@
+@@ -0,0 +1,494 @@
 +import hashlib
 +import json
 +import logging
@@ -18692,6 +18800,13 @@ index 0000000000000000000000000000000000000000..48b1aa59f0a08eeb26aae88dc5ae359c
 +_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="mem0-dr")
 +_SUBMIT_LOCK = threading.Lock()
 +_MAX_OUTPUT_BYTES = 1024 * 1024
++_REQUIRED_CONFIGURATION = (
++    "MEM0_S3_ENDPOINT",
++    "MEM0_S3_BUCKET",
++    "MEM0_S3_ACCESS_KEY",
++    "MEM0_S3_SECRET_KEY",
++    "MEM0_RESTIC_PASSWORD",
++)
 +
 +
 +def _utcnow() -> datetime:
@@ -18712,6 +18827,16 @@ index 0000000000000000000000000000000000000000..48b1aa59f0a08eeb26aae88dc5ae359c
 +    if len(value) > 8192:
 +        raise RuntimeError(f"灾备配置 {name} 超过大小限制")
 +    return value
++
++
++def disaster_recovery_configuration() -> dict[str, Any]:
++    missing = []
++    for name in _REQUIRED_CONFIGURATION:
++        try:
++            _read_value(name)
++        except RuntimeError:
++            missing.append(name)
++    return {"configured": not missing, "missing": missing}
 +
 +
 +def _postgres_database_names(*, drill: bool = False) -> tuple[str, str]:
@@ -19146,101 +19271,21 @@ index 0000000000000000000000000000000000000000..48b1aa59f0a08eeb26aae88dc5ae359c
 +                finished_at.timestamp(),
 +                kind=kind,
 +            )
-diff --git a/server/docker-compose.yaml b/server/docker-compose.yaml
-index 7e382f7c80fdbf91b3ff78ab2a382c119e193076..70556374d2e78f5f3cf4784b373b3d5d3adb4643 100644
---- a/server/docker-compose.yaml
-+++ b/server/docker-compose.yaml
-@@ -1 +1 @@
--name: mem0-dev
-+name: ${MEM0_COMPOSE_PROJECT_NAME:-mem0-dev}
-@@ -4,0 +5 @@ services:
-+    image: ${MEM0_IMAGE:?必须设置 MEM0_IMAGE 为带发布标识的 Mem0 镜像}
-@@ -7 +8,3 @@ services:
--      dockerfile: server/dev.Dockerfile
-+      dockerfile: server/prod.Dockerfile
-+    restart: unless-stopped
-+    init: true
-@@ -9 +12 @@ services:
--      - "8888:8000"
-+      - "127.0.0.1:${MEM0_HOST_PORT:-8888}:8000"
-@@ -11 +14 @@ services:
--      - .env
-+      - ${MEM0_RUNTIME_ROOT:-/data/mem0-runtime}/runtime.env
-@@ -13 +16,5 @@ services:
--      - mem0_network
-+      - mem0_data
-+      - mem0_dashboard
-+      - mcp_network
-+      - model_gateway_network
-+      - observability
-@@ -15,7 +22,30 @@ services:
--      - ./history:/app/history
--      - .:/app
--    depends_on:
--      postgres:
--        condition: service_healthy
--    command: >
--      sh -c "rm -rf /app/packages && pip install -q --force-reinstall --no-deps mem0ai && alembic upgrade head && uvicorn main:app --host 0.0.0.0 --port 8000 --reload"
-+      - type: bind
-+        source: ${MEM0_RUNTIME_ROOT:-/data/mem0-runtime}/history
-+        target: /app/history
-+        bind:
-+          create_host_path: false
-+      - type: bind
-+        source: ${MEM0_RUNTIME_ROOT:-/data/mem0-runtime}/backups
-+        target: /app/backups
-+        bind:
-+          create_host_path: false
-+      - type: bind
-+        source: ${MEM0_RUNTIME_ROOT:-/data/mem0-runtime}/runtime.env
-+        target: /app/runtime/runtime.env
-+        read_only: true
-+        bind:
-+          create_host_path: false
-+    command: ["sh", "-c", "test -w /app/history && { test ! -e /app/history/history.db || test -w /app/history/history.db; } || { echo '错误：/app/history 或 history.db 不可写' >&2; exit 1; }; alembic upgrade head && python scripts/backfill_mcp_scope.py --apply && python scripts/backfill_memory_quality.py --apply && python scripts/retry_memory_mutations.py && python scripts/backfill_memory_quality.py && exec uvicorn main:app --host 0.0.0.0 --port 8000 --proxy-headers --forwarded-allow-ips=${MEM0_FORWARDED_ALLOW_IPS:?必须设置 MEM0_FORWARDED_ALLOW_IPS} --no-access-log --limit-concurrency 64 --timeout-keep-alive 5"]
+diff --git a/server/docker-compose.dr.yaml b/server/docker-compose.dr.yaml
+new file mode 100644
+index 0000000000000000000000000000000000000000..19998df51ae38be22055068f74c69c0035bd0395
+--- /dev/null
++++ b/server/docker-compose.dr.yaml
+@@ -0,0 +1,62 @@
++services:
++  mem0:
 +    secrets:
-+      - postgres_password
-+      - mem0_jwt_secret
-+      - llm_api_key
-+      - llm_api_base
-+      - embedding_api_key
-+      - embedding_api_base
-+      - mem0_internal_service_key
 +      - mem0_s3_endpoint
 +      - mem0_s3_bucket
 +      - mem0_s3_access_key
 +      - mem0_s3_secret_key
 +      - mem0_restic_password
-@@ -26 +56,3 @@ services:
--      - DASHBOARD_URL=http://localhost:3000
-+      - POSTGRES_HOST=mem0-postgres
-+      - POSTGRES_PORT=5432
-+      - POSTGRES_DB=postgres
-@@ -28,3 +60,118 @@ services:
--      - JWT_SECRET=${JWT_SECRET}
--      - AUTH_DISABLED=${AUTH_DISABLED:-false}
--      - MEM0_TELEMETRY=${MEM0_TELEMETRY:-true}
-+      - POSTGRES_COLLECTION_NAME=${POSTGRES_COLLECTION_NAME:?必须设置 POSTGRES_COLLECTION_NAME}
-+      - HISTORY_DB_PATH=/app/history/history.db
-+      - POSTGRES_PASSWORD_FILE=/run/secrets/postgres_password
-+      - JWT_SECRET_FILE=/run/secrets/mem0_jwt_secret
-+      - LLM_API_KEY_FILE=/run/secrets/llm_api_key
-+      - LLM_API_BASE_FILE=/run/secrets/llm_api_base
-+      - EMBEDDING_API_KEY_FILE=/run/secrets/embedding_api_key
-+      - EMBEDDING_API_BASE_FILE=/run/secrets/embedding_api_base
-+      - AUTH_DISABLED=false
-+      - MEM0_INTERNAL_SERVICE_KEY_FILE=/run/secrets/mem0_internal_service_key
-+      - MEM0_INTERNAL_USER_ID=${MEM0_INTERNAL_USER_ID:?必须设置 MEM0_INTERNAL_USER_ID}
-+      - MEM0_INTERNAL_OWNER=${MEM0_INTERNAL_OWNER:?必须设置 MEM0_INTERNAL_OWNER}
-+      - MEM0_INTERNAL_ALLOWED_HOSTS=mem0,127.0.0.1,localhost
-+      - MEM0_INTERNAL_SCAN_LIMIT=5000
-+      - MEM0_MCP_BACKFILL_BATCH_SIZE=500
-+      - MEM0_MCP_DELETE_LEASE_SECONDS=120
-+      - MEM0_MCP_DELETE_BATCH_SIZE=25
-+      - MEM0_MCP_DELETE_AUDIT_RETENTION_SECONDS=86400
-+      - MEM0_READINESS_CACHE_SECONDS=5
-+      - MEM0_DREAM_POLL_SECONDS=300
-+      - MEM0_BACKUP_ROOT=/app/backups
++    environment:
 +      - MEM0_S3_ENDPOINT_FILE=/run/secrets/mem0_s3_endpoint
 +      - MEM0_S3_BUCKET_FILE=/run/secrets/mem0_s3_bucket
 +      - MEM0_S3_ACCESS_KEY_FILE=/run/secrets/mem0_s3_access_key
@@ -19254,165 +19299,9 @@ index 7e382f7c80fdbf91b3ff78ab2a382c119e193076..70556374d2e78f5f3cf4784b373b3d5d
 +      - MEM0_DRILL_VECTOR_POSTGRES_DB=mem0_drill_vectors
 +      - MEM0_DRILL_POSTGRES_USER=${POSTGRES_USER:-postgres}
 +      - MEM0_DRILL_POSTGRES_PASSWORD_FILE=/run/secrets/postgres_password
-+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318
-+      - OTEL_SERVICE_NAME=mem0-api
-+      - MEM0_TELEMETRY=false
-+      - DASHBOARD_URL=${MEM0_DASHBOARD_URL:?必须设置 MEM0_DASHBOARD_URL}
 +    depends_on:
-+      postgres:
-+        condition: service_healthy
 +      mem0-drill-postgres:
 +        condition: service_healthy
-+    healthcheck:
-+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/readyz', timeout=5)"]
-+      interval: 20s
-+      timeout: 6s
-+      retries: 5
-+      start_period: 40s
-+    read_only: true
-+    tmpfs:
-+      - /tmp:rw,noexec,nosuid,size=64m,uid=10001,gid=10001
-+      - /home/appuser/.cache:rw,noexec,nosuid,size=64m,uid=10001,gid=10001
-+      - /home/appuser/.mem0:rw,noexec,nosuid,size=1m,uid=10001,gid=10001
-+    cap_drop:
-+      - ALL
-+    security_opt:
-+      - no-new-privileges:true
-+    pids_limit: 128
-+    mem_limit: 768m
-+    cpus: 1.5
-+
-+  mem0-mcp:
-+    image: ${MEM0_MCP_IMAGE:?必须设置 MEM0_MCP_IMAGE 为带发布标识的 MCP 镜像}
-+    build:
-+      context: ${MEM0_MCP_ROOT:-/data/mem0Mcp}
-+    restart: unless-stopped
-+    init: true
-+    ports:
-+      - "127.0.0.1:${MCP_HOST_PORT:-8890}:8080"
-+    networks:
-+      - mcp_network
-+      - mcp_entry
-+      - observability
-+    secrets:
-+      - mem0_internal_service_key
-+      - mcp_confirmation_secret
-+      - mcp_project_scope_secret
-+    environment:
-+      - MEM0_BASE_URL=http://mem0:8000
-+      - MEM0_INTERNAL_SERVICE_KEY_FILE=/run/secrets/mem0_internal_service_key
-+      - MCP_CONFIRMATION_SECRET_FILE=/run/secrets/mcp_confirmation_secret
-+      - MCP_PROJECT_SCOPE_SECRET_FILE=/run/secrets/mcp_project_scope_secret
-+      - MEM0_DEFAULT_USER_ID=${MEM0_INTERNAL_USER_ID:?必须设置 MEM0_INTERNAL_USER_ID}
-+      - MCP_OWNER=${MEM0_INTERNAL_OWNER:?必须设置 MEM0_INTERNAL_OWNER}
-+      - MEM0_TIMEOUT_SECONDS=45
-+      - MCP_READ_TIMEOUT_SECONDS=12
-+      - MCP_MAX_TEXT_LENGTH=12000
-+      - MCP_MAX_QUERY_LENGTH=2000
-+      - MCP_MAX_TOP_K=20
-+      - MCP_MAX_PAGE_SIZE=20
-+      - MCP_SCAN_LIMIT=5000
-+      - MCP_MAX_METADATA_BYTES=8192
-+      - MCP_MAX_FILTER_BYTES=8192
-+      - MCP_MAX_UPSTREAM_RESPONSE_BYTES=1000000
-+      - MCP_MAX_CONCURRENT_UPSTREAM=16
-+      - MCP_CONFIRMATION_TTL_SECONDS=300
-+      - MCP_ALLOWED_HOSTS=${MCP_ALLOWED_HOSTS:?必须设置 MCP_ALLOWED_HOSTS}
-+      - MCP_ALLOWED_ORIGINS=${MCP_ALLOWED_ORIGINS:?必须设置 MCP_ALLOWED_ORIGINS}
-+    depends_on:
-+      mem0:
-+        condition: service_healthy
-+    healthcheck:
-+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/readyz', timeout=5)"]
-+      interval: 15s
-+      timeout: 6s
-+      retries: 4
-+      start_period: 30s
-+    read_only: true
-+    tmpfs:
-+      - /tmp:rw,noexec,nosuid,size=32m,uid=10001,gid=10001
-+    cap_drop:
-+      - ALL
-+    security_opt:
-+      - no-new-privileges:true
-+    pids_limit: 64
-+    mem_limit: 256m
-+    cpus: 0.5
-@@ -33,18 +180,29 @@ services:
--      image: pgvector/pgvector:pg17
--      restart: on-failure
--      shm_size: "128mb"
--      networks:
--        - mem0_network
--      environment:
--        - POSTGRES_USER=${POSTGRES_USER:-postgres}
--        - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
--      healthcheck:
--        test: ["CMD-SHELL", "pg_isready -q -d postgres -U ${POSTGRES_USER:-postgres}"]
--        interval: 5s
--        timeout: 5s
--        retries: 5
--      volumes:
--        - postgres_db:/var/lib/postgresql/data
--        - ./init-db.sh:/docker-entrypoint-initdb.d/init-db.sh
--      ports:
--        - "8432:5432"
-+    image: pgvector/pgvector:pg17@sha256:7ae6051efd0e60444282c27c7e141af07f322ce033300e727a49c3dd11075e38
-+    restart: unless-stopped
-+    init: true
-+    shm_size: "128mb"
-+    networks:
-+      mem0_data:
-+        aliases:
-+          - mem0-postgres
-+      observability:
-+    environment:
-+      - POSTGRES_USER=${POSTGRES_USER:-postgres}
-+      - POSTGRES_PASSWORD_FILE=/run/secrets/postgres_password
-+    secrets:
-+      - postgres_password
-+    healthcheck:
-+      test: ["CMD-SHELL", "pg_isready -q -d postgres -U ${POSTGRES_USER:-postgres}"]
-+      interval: 5s
-+      timeout: 5s
-+      retries: 5
-+    volumes:
-+      - postgres_db:/var/lib/postgresql/data
-+      - ./init-db.sh:/docker-entrypoint-initdb.d/init-db.sh:ro
-+    ports:
-+      - "127.0.0.1:${POSTGRES_HOST_PORT:-8432}:5432"
-+    pids_limit: 256
-+    mem_limit: 1024m
-+    cpus: 2.0
-+    security_opt:
-+      - no-new-privileges:true
-@@ -52,0 +211 @@ services:
-+    image: ${MEM0_DASHBOARD_IMAGE:?必须设置 MEM0_DASHBOARD_IMAGE 为带发布标识的 Dashboard 镜像}
-@@ -53,0 +213,2 @@ services:
-+    restart: unless-stopped
-+    init: true
-@@ -55 +216 @@ services:
--      - "3000:3000"
-+      - "127.0.0.1:${DASHBOARD_HOST_PORT:-3111}:3000"
-@@ -57 +218,3 @@ services:
--      - mem0_network
-+      - mem0_dashboard
-+      - reverse_proxy_network
-+      - observability
-@@ -59 +222 @@ services:
--      - NEXT_PUBLIC_API_URL=http://localhost:8888
-+      - NEXT_PUBLIC_API_URL=${MEM0_PUBLIC_API_URL:?必须设置 MEM0_PUBLIC_API_URL}
-@@ -64 +227 @@ services:
--        condition: service_started
-+        condition: service_healthy
-@@ -69,0 +233,177 @@ services:
-+    pids_limit: 128
-+    mem_limit: 512m
-+    cpus: 1.0
-+    cap_drop:
-+      - ALL
-+    security_opt:
-+      - no-new-privileges:true
 +
 +  mem0-drill-postgres:
 +    image: pgvector/pgvector:pg17@sha256:7ae6051efd0e60444282c27c7e141af07f322ce033300e727a49c3dd11075e38
@@ -19438,6 +19327,28 @@ index 7e382f7c80fdbf91b3ff78ab2a382c119e193076..70556374d2e78f5f3cf4784b373b3d5d
 +    cpus: 1.0
 +    security_opt:
 +      - no-new-privileges:true
++
++secrets:
++  mem0_s3_endpoint:
++    file: ${MEM0_RUNTIME_ROOT:-/data/mem0-runtime}/secrets/mem0_s3_endpoint
++  mem0_s3_bucket:
++    file: ${MEM0_RUNTIME_ROOT:-/data/mem0-runtime}/secrets/mem0_s3_bucket
++  mem0_s3_access_key:
++    file: ${MEM0_RUNTIME_ROOT:-/data/mem0-runtime}/secrets/mem0_s3_access_key
++  mem0_s3_secret_key:
++    file: ${MEM0_RUNTIME_ROOT:-/data/mem0-runtime}/secrets/mem0_s3_secret_key
++  mem0_restic_password:
++    file: ${MEM0_RUNTIME_ROOT:-/data/mem0-runtime}/secrets/mem0_restic_password
+diff --git a/server/docker-compose.observability.yaml b/server/docker-compose.observability.yaml
+new file mode 100644
+index 0000000000000000000000000000000000000000..c1459ba0b55321c00060b9c020cb781cbc1a87f3
+--- /dev/null
++++ b/server/docker-compose.observability.yaml
+@@ -0,0 +1,159 @@
++services:
++  mem0:
++    environment:
++      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318
 +
 +  prometheus:
 +    image: prom/prometheus:v2.55.1@sha256:2659f4c2ebb718e7695cb9b25ffa7d6be64db013daba13e05c875451cf51b0d3
@@ -19465,11 +19376,10 @@ index 7e382f7c80fdbf91b3ff78ab2a382c119e193076..70556374d2e78f5f3cf4784b373b3d5d
 +    image: prom/alertmanager:v0.28.0@sha256:d5155cfac40a6d9250ffc97c19db2c5e190c7bc57c6b67125c94903358f8c7d8
 +    restart: unless-stopped
 +    command:
-+      - --config.file=/run/secrets/alertmanager_config
++      - --config.file=/etc/alertmanager/alertmanager.yml
 +      - --storage.path=/alertmanager
-+    secrets:
-+      - alertmanager_config
 +    volumes:
++      - ./monitoring/alertmanager-local.yml:/etc/alertmanager/alertmanager.yml:ro
 +      - alertmanager_data:/alertmanager
 +    ports:
 +      - "127.0.0.1:${ALERTMANAGER_HOST_PORT:-9093}:9093"
@@ -19583,13 +19493,282 @@ index 7e382f7c80fdbf91b3ff78ab2a382c119e193076..70556374d2e78f5f3cf4784b373b3d5d
 +      - observability
 +    security_opt:
 +      - no-new-privileges:true
-@@ -72,0 +413,5 @@ volumes:
++
++volumes:
 +  prometheus_data:
 +  alertmanager_data:
 +  grafana_data:
 +  loki_data:
 +  tempo_data:
-@@ -75 +420,9 @@ networks:
++
++secrets:
++  grafana_admin_password:
++    file: ${MEM0_RUNTIME_ROOT:-/data/mem0-runtime}/secrets/grafana_admin_password
+diff --git a/server/docker-compose.smtp.yaml b/server/docker-compose.smtp.yaml
+new file mode 100644
+index 0000000000000000000000000000000000000000..db0bc1f4282c804732c5752d990aab4da20c03d7
+--- /dev/null
++++ b/server/docker-compose.smtp.yaml
+@@ -0,0 +1,11 @@
++services:
++  alertmanager:
++    command:
++      - --config.file=/run/secrets/alertmanager_config
++      - --storage.path=/alertmanager
++    secrets:
++      - alertmanager_config
++
++secrets:
++  alertmanager_config:
++    file: ${MEM0_RUNTIME_ROOT:-/data/mem0-runtime}/secrets/alertmanager.yml
+diff --git a/server/docker-compose.yaml b/server/docker-compose.yaml
+index 7e382f7c80fdbf91b3ff78ab2a382c119e193076..1273f2b3d5c72273d57715185dace3e88c87ea6d 100644
+--- a/server/docker-compose.yaml
++++ b/server/docker-compose.yaml
+@@ -1 +1 @@
+-name: mem0-dev
++name: ${MEM0_COMPOSE_PROJECT_NAME:-mem0-dev}
+@@ -4,0 +5 @@ services:
++    image: ${MEM0_IMAGE:?必须设置 MEM0_IMAGE 为带发布标识的 Mem0 镜像}
+@@ -7 +8,3 @@ services:
+-      dockerfile: server/dev.Dockerfile
++      dockerfile: server/prod.Dockerfile
++    restart: unless-stopped
++    init: true
+@@ -9 +12 @@ services:
+-      - "8888:8000"
++      - "127.0.0.1:${MEM0_HOST_PORT:-8888}:8000"
+@@ -11 +14 @@ services:
+-      - .env
++      - ${MEM0_RUNTIME_ROOT:-/data/mem0-runtime}/runtime.env
+@@ -13 +16,5 @@ services:
+-      - mem0_network
++      - mem0_data
++      - mem0_dashboard
++      - mcp_network
++      - model_gateway_network
++      - observability
+@@ -15,7 +22,25 @@ services:
+-      - ./history:/app/history
+-      - .:/app
+-    depends_on:
+-      postgres:
+-        condition: service_healthy
+-    command: >
+-      sh -c "rm -rf /app/packages && pip install -q --force-reinstall --no-deps mem0ai && alembic upgrade head && uvicorn main:app --host 0.0.0.0 --port 8000 --reload"
++      - type: bind
++        source: ${MEM0_RUNTIME_ROOT:-/data/mem0-runtime}/history
++        target: /app/history
++        bind:
++          create_host_path: false
++      - type: bind
++        source: ${MEM0_RUNTIME_ROOT:-/data/mem0-runtime}/backups
++        target: /app/backups
++        bind:
++          create_host_path: false
++      - type: bind
++        source: ${MEM0_RUNTIME_ROOT:-/data/mem0-runtime}/runtime.env
++        target: /app/runtime/runtime.env
++        read_only: true
++        bind:
++          create_host_path: false
++    command: ["sh", "-c", "test -w /app/history && { test ! -e /app/history/history.db || test -w /app/history/history.db; } || { echo '错误：/app/history 或 history.db 不可写' >&2; exit 1; }; alembic upgrade head && python scripts/backfill_mcp_scope.py --apply && python scripts/backfill_memory_quality.py --apply && python scripts/retry_memory_mutations.py && python scripts/backfill_memory_quality.py && exec uvicorn main:app --host 0.0.0.0 --port 8000 --proxy-headers --forwarded-allow-ips=${MEM0_FORWARDED_ALLOW_IPS:?必须设置 MEM0_FORWARDED_ALLOW_IPS} --no-access-log --limit-concurrency 64 --timeout-keep-alive 5"]
++    secrets:
++      - postgres_password
++      - mem0_jwt_secret
++      - llm_api_key
++      - llm_api_base
++      - embedding_api_key
++      - embedding_api_base
++      - mem0_internal_service_key
+@@ -26 +51,3 @@ services:
+-      - DASHBOARD_URL=http://localhost:3000
++      - POSTGRES_HOST=mem0-postgres
++      - POSTGRES_PORT=5432
++      - POSTGRES_DB=postgres
+@@ -28,3 +55,103 @@ services:
+-      - JWT_SECRET=${JWT_SECRET}
+-      - AUTH_DISABLED=${AUTH_DISABLED:-false}
+-      - MEM0_TELEMETRY=${MEM0_TELEMETRY:-true}
++      - POSTGRES_COLLECTION_NAME=${POSTGRES_COLLECTION_NAME:?必须设置 POSTGRES_COLLECTION_NAME}
++      - HISTORY_DB_PATH=/app/history/history.db
++      - POSTGRES_PASSWORD_FILE=/run/secrets/postgres_password
++      - JWT_SECRET_FILE=/run/secrets/mem0_jwt_secret
++      - LLM_API_KEY_FILE=/run/secrets/llm_api_key
++      - LLM_API_BASE_FILE=/run/secrets/llm_api_base
++      - EMBEDDING_API_KEY_FILE=/run/secrets/embedding_api_key
++      - EMBEDDING_API_BASE_FILE=/run/secrets/embedding_api_base
++      - AUTH_DISABLED=false
++      - MEM0_INTERNAL_SERVICE_KEY_FILE=/run/secrets/mem0_internal_service_key
++      - MEM0_INTERNAL_USER_ID=${MEM0_INTERNAL_USER_ID:?必须设置 MEM0_INTERNAL_USER_ID}
++      - MEM0_INTERNAL_OWNER=${MEM0_INTERNAL_OWNER:?必须设置 MEM0_INTERNAL_OWNER}
++      - MEM0_INTERNAL_ALLOWED_HOSTS=mem0,127.0.0.1,localhost
++      - MEM0_INTERNAL_SCAN_LIMIT=5000
++      - MEM0_MCP_BACKFILL_BATCH_SIZE=500
++      - MEM0_MCP_DELETE_LEASE_SECONDS=120
++      - MEM0_MCP_DELETE_BATCH_SIZE=25
++      - MEM0_MCP_DELETE_AUDIT_RETENTION_SECONDS=86400
++      - MEM0_READINESS_CACHE_SECONDS=5
++      - MEM0_DREAM_POLL_SECONDS=300
++      - MEM0_BACKUP_ROOT=/app/backups
++      - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-}
++      - OTEL_SERVICE_NAME=mem0-api
++      - MEM0_TELEMETRY=false
++      - DASHBOARD_URL=${MEM0_DASHBOARD_URL:?必须设置 MEM0_DASHBOARD_URL}
++    depends_on:
++      postgres:
++        condition: service_healthy
++    healthcheck:
++      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/readyz', timeout=5)"]
++      interval: 20s
++      timeout: 6s
++      retries: 5
++      start_period: 40s
++    read_only: true
++    tmpfs:
++      - /tmp:rw,noexec,nosuid,size=64m,uid=10001,gid=10001
++      - /home/appuser/.cache:rw,noexec,nosuid,size=64m,uid=10001,gid=10001
++      - /home/appuser/.mem0:rw,noexec,nosuid,size=1m,uid=10001,gid=10001
++    cap_drop:
++      - ALL
++    security_opt:
++      - no-new-privileges:true
++    pids_limit: 128
++    mem_limit: 768m
++    cpus: 1.5
++
++  mem0-mcp:
++    image: ${MEM0_MCP_IMAGE:?必须设置 MEM0_MCP_IMAGE 为带发布标识的 MCP 镜像}
++    build:
++      context: ${MEM0_MCP_ROOT:-/data/mem0Mcp}
++    restart: unless-stopped
++    init: true
++    ports:
++      - "127.0.0.1:${MCP_HOST_PORT:-8890}:8080"
++    networks:
++      - mcp_network
++      - mcp_entry
++      - observability
++    secrets:
++      - mem0_internal_service_key
++      - mcp_confirmation_secret
++      - mcp_project_scope_secret
++    environment:
++      - MEM0_BASE_URL=http://mem0:8000
++      - MEM0_INTERNAL_SERVICE_KEY_FILE=/run/secrets/mem0_internal_service_key
++      - MCP_CONFIRMATION_SECRET_FILE=/run/secrets/mcp_confirmation_secret
++      - MCP_PROJECT_SCOPE_SECRET_FILE=/run/secrets/mcp_project_scope_secret
++      - MEM0_DEFAULT_USER_ID=${MEM0_INTERNAL_USER_ID:?必须设置 MEM0_INTERNAL_USER_ID}
++      - MCP_OWNER=${MEM0_INTERNAL_OWNER:?必须设置 MEM0_INTERNAL_OWNER}
++      - MEM0_TIMEOUT_SECONDS=45
++      - MCP_READ_TIMEOUT_SECONDS=12
++      - MCP_MAX_TEXT_LENGTH=12000
++      - MCP_MAX_QUERY_LENGTH=2000
++      - MCP_MAX_TOP_K=20
++      - MCP_MAX_PAGE_SIZE=20
++      - MCP_SCAN_LIMIT=5000
++      - MCP_MAX_METADATA_BYTES=8192
++      - MCP_MAX_FILTER_BYTES=8192
++      - MCP_MAX_UPSTREAM_RESPONSE_BYTES=1000000
++      - MCP_MAX_CONCURRENT_UPSTREAM=16
++      - MCP_CONFIRMATION_TTL_SECONDS=300
++      - MCP_ALLOWED_HOSTS=${MCP_ALLOWED_HOSTS:?必须设置 MCP_ALLOWED_HOSTS}
++      - MCP_ALLOWED_ORIGINS=${MCP_ALLOWED_ORIGINS:?必须设置 MCP_ALLOWED_ORIGINS}
++    depends_on:
++      mem0:
++        condition: service_healthy
++    healthcheck:
++      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/readyz', timeout=5)"]
++      interval: 15s
++      timeout: 6s
++      retries: 4
++      start_period: 30s
++    read_only: true
++    tmpfs:
++      - /tmp:rw,noexec,nosuid,size=32m,uid=10001,gid=10001
++    cap_drop:
++      - ALL
++    security_opt:
++      - no-new-privileges:true
++    pids_limit: 64
++    mem_limit: 256m
++    cpus: 0.5
+@@ -33,18 +160,29 @@ services:
+-      image: pgvector/pgvector:pg17
+-      restart: on-failure
+-      shm_size: "128mb"
+-      networks:
+-        - mem0_network
+-      environment:
+-        - POSTGRES_USER=${POSTGRES_USER:-postgres}
+-        - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+-      healthcheck:
+-        test: ["CMD-SHELL", "pg_isready -q -d postgres -U ${POSTGRES_USER:-postgres}"]
+-        interval: 5s
+-        timeout: 5s
+-        retries: 5
+-      volumes:
+-        - postgres_db:/var/lib/postgresql/data
+-        - ./init-db.sh:/docker-entrypoint-initdb.d/init-db.sh
+-      ports:
+-        - "8432:5432"
++    image: pgvector/pgvector:pg17@sha256:7ae6051efd0e60444282c27c7e141af07f322ce033300e727a49c3dd11075e38
++    restart: unless-stopped
++    init: true
++    shm_size: "128mb"
++    networks:
++      mem0_data:
++        aliases:
++          - mem0-postgres
++      observability:
++    environment:
++      - POSTGRES_USER=${POSTGRES_USER:-postgres}
++      - POSTGRES_PASSWORD_FILE=/run/secrets/postgres_password
++    secrets:
++      - postgres_password
++    healthcheck:
++      test: ["CMD-SHELL", "pg_isready -q -d postgres -U ${POSTGRES_USER:-postgres}"]
++      interval: 5s
++      timeout: 5s
++      retries: 5
++    volumes:
++      - postgres_db:/var/lib/postgresql/data
++      - ./init-db.sh:/docker-entrypoint-initdb.d/init-db.sh:ro
++    ports:
++      - "127.0.0.1:${POSTGRES_HOST_PORT:-8432}:5432"
++    pids_limit: 256
++    mem_limit: 1024m
++    cpus: 2.0
++    security_opt:
++      - no-new-privileges:true
+@@ -52,0 +191 @@ services:
++    image: ${MEM0_DASHBOARD_IMAGE:?必须设置 MEM0_DASHBOARD_IMAGE 为带发布标识的 Dashboard 镜像}
+@@ -53,0 +193,2 @@ services:
++    restart: unless-stopped
++    init: true
+@@ -55 +196 @@ services:
+-      - "3000:3000"
++      - "127.0.0.1:${DASHBOARD_HOST_PORT:-3111}:3000"
+@@ -57 +198,3 @@ services:
+-      - mem0_network
++      - mem0_dashboard
++      - reverse_proxy_network
++      - observability
+@@ -59 +202 @@ services:
+-      - NEXT_PUBLIC_API_URL=http://localhost:8888
++      - NEXT_PUBLIC_API_URL=${MEM0_PUBLIC_API_URL:?必须设置 MEM0_PUBLIC_API_URL}
+@@ -64 +207 @@ services:
+-        condition: service_started
++        condition: service_healthy
+@@ -69,0 +213,7 @@ services:
++    pids_limit: 128
++    mem_limit: 512m
++    cpus: 1.0
++    cap_drop:
++      - ALL
++    security_opt:
++      - no-new-privileges:true
+@@ -75 +225,9 @@ networks:
 -  mem0_network:
 +  mem0_data:
 +    driver: bridge
@@ -19600,7 +19779,7 @@ index 7e382f7c80fdbf91b3ff78ab2a382c119e193076..70556374d2e78f5f3cf4784b373b3d5d
 +          gateway: ${MEM0_DATA_GATEWAY:?必须设置 MEM0_DATA_GATEWAY}
 +
 +  mem0_dashboard:
-@@ -76,0 +430,66 @@ networks:
+@@ -76,0 +235,52 @@ networks:
 +    internal: true
 +    ipam:
 +      config:
@@ -19653,20 +19832,6 @@ index 7e382f7c80fdbf91b3ff78ab2a382c119e193076..70556374d2e78f5f3cf4784b373b3d5d
 +    file: ${MEM0_MCP_ROOT:-/data/mem0Mcp}/secrets/mcp_confirmation_secret
 +  mcp_project_scope_secret:
 +    file: ${MEM0_MCP_ROOT:-/data/mem0Mcp}/secrets/mcp_project_scope_secret
-+  mem0_s3_endpoint:
-+    file: ${MEM0_RUNTIME_ROOT:-/data/mem0-runtime}/secrets/mem0_s3_endpoint
-+  mem0_s3_bucket:
-+    file: ${MEM0_RUNTIME_ROOT:-/data/mem0-runtime}/secrets/mem0_s3_bucket
-+  mem0_s3_access_key:
-+    file: ${MEM0_RUNTIME_ROOT:-/data/mem0-runtime}/secrets/mem0_s3_access_key
-+  mem0_s3_secret_key:
-+    file: ${MEM0_RUNTIME_ROOT:-/data/mem0-runtime}/secrets/mem0_s3_secret_key
-+  mem0_restic_password:
-+    file: ${MEM0_RUNTIME_ROOT:-/data/mem0-runtime}/secrets/mem0_restic_password
-+  alertmanager_config:
-+    file: ${MEM0_RUNTIME_ROOT:-/data/mem0-runtime}/secrets/alertmanager.yml
-+  grafana_admin_password:
-+    file: ${MEM0_RUNTIME_ROOT:-/data/mem0-runtime}/secrets/grafana_admin_password
 diff --git a/server/errors.py b/server/errors.py
 index 14d0907bc4d49850eadbf96f64a214e3324cb2b0..00f3ccc7d34e7e8b82aef5539e7a70356e1c4818 100644
 --- a/server/errors.py
@@ -19712,10 +19877,10 @@ index 14d0907bc4d49850eadbf96f64a214e3324cb2b0..00f3ccc7d34e7e8b82aef5539e7a7035
 +        headers={"X-Request-ID": exc.request_id, "X-Correlation-ID": exc.request_id},
 diff --git a/server/governance_service.py b/server/governance_service.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..cf5cdc09a8963abb06c2d60a3a865e39a649d82c
+index 0000000000000000000000000000000000000000..262567787e2b4f3d3e3312e62874fba668c77fbe
 --- /dev/null
 +++ b/server/governance_service.py
-@@ -0,0 +1,298 @@
+@@ -0,0 +1,300 @@
 +import hashlib
 +import json
 +import logging
@@ -19757,8 +19922,10 @@ index 0000000000000000000000000000000000000000..cf5cdc09a8963abb06c2d60a3a865e39
 +    "backup_interval_hours": 24,
 +    "backup_retention": 14,
 +    "backup_last_run_at": None,
-+    "disaster_recovery_enabled": True,
-+    "restore_drill_enabled": True,
++    "disaster_recovery_enabled": False,
++    "disaster_recovery_interval_hours": 24,
++    "restore_drill_enabled": False,
++    "restore_drill_interval_days": 7,
 +    "temporal_validity_enabled": True,
 +    "llm_conflict_classification_enabled": True,
 +    "incremental_projection_enabled": True,
@@ -24516,12 +24683,27 @@ index ad9e8af3b60217890a07eae54f982a6f42c01b9a..38a53053bdf36d05facc83160d3350cd
 +    refill_rate: Mapped[float] = mapped_column(Float, default=0)
 +    last_refill_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 +    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
+diff --git a/server/monitoring/alertmanager-local.yml b/server/monitoring/alertmanager-local.yml
+new file mode 100644
+index 0000000000000000000000000000000000000000..e825c975e769d8728052a9c7094eda1a5541e3d3
+--- /dev/null
++++ b/server/monitoring/alertmanager-local.yml
+@@ -0,0 +1,9 @@
++route:
++  receiver: 本地告警
++  group_by: [alertname]
++  group_wait: 30s
++  group_interval: 5m
++  repeat_interval: 4h
++
++receivers:
++  - name: 本地告警
 diff --git a/server/monitoring/alerts.yml b/server/monitoring/alerts.yml
 new file mode 100644
-index 0000000000000000000000000000000000000000..2f41357756978c3f59f49de90f4aee721af2101c
+index 0000000000000000000000000000000000000000..bd2f9de2aa2c2f3f76231915aac9ee58a8b5e779
 --- /dev/null
 +++ b/server/monitoring/alerts.yml
-@@ -0,0 +1,89 @@
+@@ -0,0 +1,96 @@
 +groups:
 +  - name: mem0-production
 +    rules:
@@ -24579,11 +24761,18 @@ index 0000000000000000000000000000000000000000..2f41357756978c3f59f49de90f4aee72
 +          summary: "检索零结果次数异常升高"
 +
 +      - alert: Mem0BackupStale
-+        expr: (time() - mem0_disaster_recovery_last_success_timestamp_seconds{kind="backup"} > 108000) or absent(mem0_disaster_recovery_last_success_timestamp_seconds{kind="backup"})
++        expr: mem0_disaster_recovery_configured == 1 and on() (time() - mem0_disaster_recovery_last_success_timestamp_seconds{kind="backup"} > mem0_disaster_recovery_interval_hours * 3600 + 21600)
 +        for: 15m
 +        labels: { severity: critical }
 +        annotations:
-+          summary: "S3 灾备超过 30 小时未成功"
++          summary: "S3 灾备超过配置周期仍未成功"
++
++      - alert: Mem0DisasterRecoveryNotConfigured
++        expr: mem0_disaster_recovery_enabled == 1 and mem0_disaster_recovery_configured == 0
++        for: 15m
++        labels: { severity: warning }
++        annotations:
++          summary: "S3 灾备已启用但配置不完整"
 +
 +      - alert: Mem0DisasterRecoveryFailure
 +        expr: increase(mem0_disaster_recovery_failures_total[1h]) > 0
@@ -31242,13 +31431,12 @@ index 0000000000000000000000000000000000000000..bd15a49c3af41cb6f1e3bad71252a907
 +    }
 diff --git a/server/routers/platform_operations.py b/server/routers/platform_operations.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..dba961b6dc14c0723ff94ab0a28ef7ebfa071ee5
+index 0000000000000000000000000000000000000000..f94417567f644690f2b70d2ce861dfd7627492ba
 --- /dev/null
 +++ b/server/routers/platform_operations.py
-@@ -0,0 +1,1420 @@
+@@ -0,0 +1,1463 @@
 +import asyncio
 +import hmac
-+import os
 +import uuid
 +from contextlib import asynccontextmanager, suppress
 +from datetime import datetime, timedelta, timezone
@@ -31257,6 +31445,7 @@ index 0000000000000000000000000000000000000000..dba961b6dc14c0723ff94ab0a28ef7eb
 +from auth import hash_password, require_admin, require_editor
 +from db import get_db
 +from disaster_recovery_service import (
++    disaster_recovery_configuration,
 +    queue_disaster_recovery_run,
 +    recover_interrupted_disaster_recovery_runs,
 +)
@@ -31276,6 +31465,7 @@ index 0000000000000000000000000000000000000000..dba961b6dc14c0723ff94ab0a28ef7eb
 +    SearchEvaluationRun,
 +    User,
 +)
++from metrics import set_gauge as metric_set_gauge
 +from pagination import decode_cursor, page_info
 +from platform_service import (
 +    detect_memory_conflicts,
@@ -31292,7 +31482,7 @@ index 0000000000000000000000000000000000000000..dba961b6dc14c0723ff94ab0a28ef7eb
 +    recover_interrupted_jobs,
 +    scope_filters_for_user,
 +)
-+from pydantic import BaseModel, EmailStr, Field, field_validator
++from pydantic import BaseModel, EmailStr, Field, field_validator, model_validator
 +from sqlalchemy import and_, func, or_, select, text
 +from sqlalchemy.exc import IntegrityError
 +from sqlalchemy.orm import Session
@@ -31376,7 +31566,17 @@ index 0000000000000000000000000000000000000000..dba961b6dc14c0723ff94ab0a28ef7eb
 +    queued_id = None
 +    with SessionLocal() as db:
 +        settings = get_governance_settings(db)
-+        if not settings.get("disaster_recovery_enabled"):
++        enabled = bool(settings.get("disaster_recovery_enabled"))
++        metric_set_gauge("mem0_disaster_recovery_enabled", 1 if enabled else 0)
++        if not enabled:
++            metric_set_gauge("mem0_disaster_recovery_configured", 0)
++            return
++        configuration = disaster_recovery_configuration()
++        metric_set_gauge(
++            "mem0_disaster_recovery_configured",
++            1 if configuration["configured"] else 0,
++        )
++        if not configuration["configured"]:
 +            return
 +        locked = db.scalar(
 +            text("SELECT pg_try_advisory_xact_lock(hashtextextended(:name, 0))"),
@@ -31398,7 +31598,21 @@ index 0000000000000000000000000000000000000000..dba961b6dc14c0723ff94ab0a28ef7eb
 +            .order_by(DisasterRecoveryRun.finished_at.desc())
 +            .limit(1)
 +        )
-+        if latest_backup is None or not latest_backup.finished_at or now - latest_backup.finished_at > timedelta(hours=24):
++        metric_set_gauge(
++            "mem0_disaster_recovery_last_success_timestamp_seconds",
++            latest_backup.finished_at.timestamp()
++            if latest_backup is not None and latest_backup.finished_at
++            else 0,
++            kind="backup",
++        )
++        backup_interval = timedelta(
++            hours=max(1, min(int(settings.get("disaster_recovery_interval_hours", 24)), 720))
++        )
++        metric_set_gauge(
++            "mem0_disaster_recovery_interval_hours",
++            backup_interval.total_seconds() / 3600,
++        )
++        if latest_backup is None or not latest_backup.finished_at or now - latest_backup.finished_at > backup_interval:
 +            row = DisasterRecoveryRun(kind="backup", repository="s3")
 +        elif settings.get("restore_drill_enabled"):
 +            latest_drill = db.scalar(
@@ -31407,7 +31621,10 @@ index 0000000000000000000000000000000000000000..dba961b6dc14c0723ff94ab0a28ef7eb
 +                .order_by(DisasterRecoveryRun.finished_at.desc())
 +                .limit(1)
 +            )
-+            if latest_drill is not None and latest_drill.finished_at and now - latest_drill.finished_at <= timedelta(days=7):
++            drill_interval = timedelta(
++                days=max(1, min(int(settings.get("restore_drill_interval_days", 7)), 90))
++            )
++            if latest_drill is not None and latest_drill.finished_at and now - latest_drill.finished_at <= drill_interval:
 +                return
 +            row = DisasterRecoveryRun(kind="restore_drill", repository="s3")
 +        else:
@@ -31458,6 +31675,16 @@ index 0000000000000000000000000000000000000000..dba961b6dc14c0723ff94ab0a28ef7eb
 +    backup_enabled: bool
 +    backup_interval_hours: int = Field(..., ge=1, le=720)
 +    backup_retention: int = Field(..., ge=1, le=100)
++    disaster_recovery_enabled: bool = False
++    disaster_recovery_interval_hours: int = Field(24, ge=1, le=720)
++    restore_drill_enabled: bool = False
++    restore_drill_interval_days: int = Field(7, ge=1, le=90)
++
++    @model_validator(mode="after")
++    def validate_disaster_recovery(self):
++        if self.restore_drill_enabled and not self.disaster_recovery_enabled:
++            raise ValueError("启用恢复演练前必须先启用 S3 异地灾备。")
++        return self
 +
 +
 +@router.get("/settings")
@@ -31629,17 +31856,14 @@ index 0000000000000000000000000000000000000000..dba961b6dc14c0723ff94ab0a28ef7eb
 +            .limit(1)
 +        )
 +        latest[kind] = _disaster_recovery_item(row) if row else None
-+    required = (
-+        "MEM0_S3_ENDPOINT",
-+        "MEM0_S3_BUCKET",
-+        "MEM0_S3_ACCESS_KEY_FILE",
-+        "MEM0_S3_SECRET_KEY_FILE",
-+        "MEM0_RESTIC_PASSWORD_FILE",
-+    )
++    settings = get_governance_settings(db)
++    configuration = disaster_recovery_configuration()
 +    return {
-+        "configured": all(bool(os.environ.get(name, "").strip()) for name in required),
++        **configuration,
++        "enabled": bool(settings.get("disaster_recovery_enabled")),
++        "restore_drill_enabled": bool(settings.get("restore_drill_enabled")),
 +        "latest": latest,
-+        "rpo_hours": 24,
++        "rpo_hours": int(settings.get("disaster_recovery_interval_hours", 24)),
 +        "rto_target_hours": 2,
 +    }
 +
@@ -31650,6 +31874,14 @@ index 0000000000000000000000000000000000000000..dba961b6dc14c0723ff94ab0a28ef7eb
 +    user: User = Depends(require_admin),
 +    db: Session = Depends(get_db),
 +):
++    settings = get_governance_settings(db)
++    if not settings.get("disaster_recovery_enabled"):
++        raise HTTPException(status_code=409, detail="S3 异地灾备尚未启用。")
++    configuration = disaster_recovery_configuration()
++    if not configuration["configured"]:
++        raise HTTPException(status_code=409, detail="S3 异地灾备配置不完整。")
++    if body.kind == "restore_drill" and not settings.get("restore_drill_enabled"):
++        raise HTTPException(status_code=409, detail="隔离恢复演练尚未启用。")
 +    enforce_quota("heavy", f"dashboard:{user.id}")
 +    active = db.scalar(
 +        select(func.count(DisasterRecoveryRun.id)).where(
@@ -34983,10 +35215,10 @@ index 0000000000000000000000000000000000000000..7014bb641303d72f2fba22da8e3ef6c8
 +    unittest.main()
 diff --git a/server/test_platform_operations.py b/server/test_platform_operations.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..6bb7f1be65a75a3c2a10e2d256c4a205fe1ca6f0
+index 0000000000000000000000000000000000000000..c6624bb312f70979494956803d35d4e8571a3d4a
 --- /dev/null
 +++ b/server/test_platform_operations.py
-@@ -0,0 +1,1059 @@
+@@ -0,0 +1,1236 @@
 +import importlib.util
 +import json
 +import os
@@ -35944,6 +36176,156 @@ index 0000000000000000000000000000000000000000..6bb7f1be65a75a3c2a10e2d256c4a205
 +    def setUp(self):
 +        self._QuotaSession.row = None
 +
++    def test_灾备与恢复演练默认关闭(self):
++        self.assertFalse(governance_service.DEFAULT_GOVERNANCE_SETTINGS["disaster_recovery_enabled"])
++        self.assertFalse(governance_service.DEFAULT_GOVERNANCE_SETTINGS["restore_drill_enabled"])
++        self.assertEqual(governance_service.DEFAULT_GOVERNANCE_SETTINGS["disaster_recovery_interval_hours"], 24)
++        self.assertEqual(governance_service.DEFAULT_GOVERNANCE_SETTINGS["restore_drill_interval_days"], 7)
++
++    def test_灾备配置读取真实Secret内容(self):
++        with TemporaryDirectory() as directory:
++            empty_secret = Path(directory) / "empty"
++            empty_secret.write_text("", encoding="utf-8")
++            with patch.dict(
++                os.environ,
++                {
++                    "MEM0_S3_ENDPOINT_FILE": str(empty_secret),
++                    "MEM0_S3_BUCKET": "bucket",
++                    "MEM0_S3_ACCESS_KEY": "access",
++                    "MEM0_S3_SECRET_KEY": "secret",
++                    "MEM0_RESTIC_PASSWORD": "restic",
++                },
++                clear=True,
++            ):
++                configuration = disaster_recovery_service.disaster_recovery_configuration()
++
++        self.assertFalse(configuration["configured"])
++        self.assertEqual(configuration["missing"], ["MEM0_S3_ENDPOINT"])
++
++    def test_灾备调度在关闭或未配置时不创建任务(self):
++        db = MagicMock()
++        with (
++            patch("db.SessionLocal", return_value=nullcontext(db)),
++            patch(
++                "routers.platform_operations.get_governance_settings",
++                return_value={"disaster_recovery_enabled": False},
++            ),
++            patch("routers.platform_operations.disaster_recovery_configuration") as configuration,
++            patch("routers.platform_operations.queue_disaster_recovery_run") as queue,
++            patch("routers.platform_operations.metric_set_gauge"),
++        ):
++            platform_router._run_due_disaster_recovery()
++        configuration.assert_not_called()
++        db.scalar.assert_not_called()
++        queue.assert_not_called()
++
++        with (
++            patch("db.SessionLocal", return_value=nullcontext(db)),
++            patch(
++                "routers.platform_operations.get_governance_settings",
++                return_value={"disaster_recovery_enabled": True},
++            ),
++            patch(
++                "routers.platform_operations.disaster_recovery_configuration",
++                return_value={"configured": False, "missing": ["MEM0_S3_ENDPOINT"]},
++            ),
++            patch("routers.platform_operations.queue_disaster_recovery_run") as queue,
++            patch("routers.platform_operations.metric_set_gauge"),
++        ):
++            platform_router._run_due_disaster_recovery()
++        db.scalar.assert_not_called()
++        queue.assert_not_called()
++
++    def test_手动灾备在关闭或未配置时明确拒绝(self):
++        body = platform_router.DisasterRecoveryRunRequest(kind="backup")
++        user = SimpleNamespace(id=uuid.uuid4())
++        db = MagicMock()
++        with (
++            patch(
++                "routers.platform_operations.get_governance_settings",
++                return_value={"disaster_recovery_enabled": False},
++            ),
++            self.assertRaises(HTTPException) as disabled,
++        ):
++            platform_router.create_disaster_recovery_run(body, user=user, db=db)
++        self.assertEqual(disabled.exception.status_code, 409)
++        self.assertIn("尚未启用", disabled.exception.detail)
++
++        with (
++            patch(
++                "routers.platform_operations.get_governance_settings",
++                return_value={"disaster_recovery_enabled": True},
++            ),
++            patch(
++                "routers.platform_operations.disaster_recovery_configuration",
++                return_value={"configured": False, "missing": ["MEM0_S3_ENDPOINT"]},
++            ),
++            self.assertRaises(HTTPException) as unconfigured,
++        ):
++            platform_router.create_disaster_recovery_run(body, user=user, db=db)
++        self.assertEqual(unconfigured.exception.status_code, 409)
++        self.assertIn("配置不完整", unconfigured.exception.detail)
++
++    def test_平台设置可保存灾备开关(self):
++        body = platform_router.PlatformSettingsRequest(
++            hybrid_search_enabled=True,
++            hybrid_vector_weight=0.65,
++            sensitive_data_mode="warn",
++            sensitive_data_types=["email"],
++            conflict_detection_enabled=True,
++            conflict_action="warn",
++            conflict_threshold=0.88,
++            backup_enabled=True,
++            backup_interval_hours=24,
++            backup_retention=14,
++            disaster_recovery_enabled=True,
++            disaster_recovery_interval_hours=24,
++            restore_drill_enabled=False,
++            restore_drill_interval_days=7,
++        )
++        saved = body.model_dump()
++        with (
++            patch("routers.platform_operations.save_governance_settings", return_value=saved) as save,
++            patch("routers.platform_operations.log_memory_activity"),
++        ):
++            result = platform_router.update_platform_settings(
++                body,
++                user=SimpleNamespace(id=uuid.uuid4()),
++                db=MagicMock(),
++            )
++
++        self.assertTrue(result["disaster_recovery_enabled"])
++        self.assertFalse(result["restore_drill_enabled"])
++        self.assertEqual(save.call_args.args[0], saved)
++
++    def test_恢复演练不能脱离灾备单独启用(self):
++        with self.assertRaises(ValueError):
++            platform_router.PlatformSettingsRequest(
++                hybrid_search_enabled=True,
++                hybrid_vector_weight=0.65,
++                sensitive_data_mode="warn",
++                sensitive_data_types=["email"],
++                conflict_detection_enabled=True,
++                conflict_action="warn",
++                conflict_threshold=0.88,
++                backup_enabled=True,
++                backup_interval_hours=24,
++                backup_retention=14,
++                disaster_recovery_enabled=False,
++                restore_drill_enabled=True,
++            )
++
++    def test_基础Compose不依赖选配Secret(self):
++        server_root = Path(__file__).parent
++        base = (server_root / "docker-compose.yaml").read_text(encoding="utf-8")
++        self.assertNotIn("mem0_s3_", base)
++        self.assertNotIn("alertmanager_config", base)
++        self.assertNotIn("grafana_admin_password", base)
++        self.assertNotIn("\n  prometheus:", base)
++        self.assertTrue((server_root / "docker-compose.dr.yaml").is_file())
++        self.assertTrue((server_root / "docker-compose.observability.yaml").is_file())
++        self.assertTrue((server_root / "docker-compose.smtp.yaml").is_file())
++
 +    def test_令牌桶耗尽后返回重试时间并按时间补充(self):
 +        settings = {
 +            "quota_enabled": True,
@@ -36042,6 +36424,33 @@ index 0000000000000000000000000000000000000000..6bb7f1be65a75a3c2a10e2d256c4a205
 +            backup_time.timestamp(),
 +            kind="backup",
 +        )
++
++    def test_灾备调度暴露可配置周期指标(self):
++        backup_time = datetime(2026, 8, 24, 12, tzinfo=timezone.utc)
++        db = MagicMock()
++        db.scalar.side_effect = [True, 0, SimpleNamespace(finished_at=backup_time)]
++        with (
++            patch("db.SessionLocal", return_value=nullcontext(db)),
++            patch(
++                "routers.platform_operations.get_governance_settings",
++                return_value={
++                    "disaster_recovery_enabled": True,
++                    "disaster_recovery_interval_hours": 72,
++                    "restore_drill_enabled": False,
++                },
++            ),
++            patch(
++                "routers.platform_operations.disaster_recovery_configuration",
++                return_value={"configured": True, "missing": []},
++            ),
++            patch("routers.platform_operations._utcnow", return_value=backup_time + timedelta(hours=1)),
++            patch("routers.platform_operations.metric_set_gauge") as set_gauge,
++            patch("routers.platform_operations.queue_disaster_recovery_run") as queue,
++        ):
++            platform_router._run_due_disaster_recovery()
++
++        set_gauge.assert_any_call("mem0_disaster_recovery_interval_hours", 72.0)
++        queue.assert_not_called()
 +
 +
 +if __name__ == "__main__":

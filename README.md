@@ -107,7 +107,7 @@ Git 仓库用于重建代码，不用于恢复生产数据。要恢复已有记�
 - Linux 主机，已安装 Git、Python 3.10 或更高版本、OpenSSL、Docker Engine 和 Docker Compose 插件。
 - 两个 HTTPS 入口：一个用于 Dashboard，一个用于 API 与精确路径 `/mcp`。
 - 能访问选定的 LLM 和 Embedding 服务。
-- 已准备禁止公开访问且启用版本控制的 S3 兼容 Bucket，并能通过 SMTP 发送告警邮件；这两项是生产发布前置条件。
+- 如需异地灾备，可准备禁止公开访问且启用版本控制的 S3 兼容 Bucket；如需邮件告警，可准备 SMTP 服务。两项均为选配，不影响核心服务部署。
 - 参考 Compose 要求连接已经存在的反向代理与模型网关外部 Docker 网络；名称必须由部署者显式配置。
 - 镜像支持 `linux/amd64` 与 `linux/arm64`；应在目标架构构建，或使用 Buildx 显式指定平台。
 
@@ -136,8 +136,11 @@ python3 scripts/materialize_mem0.py .mem0-source
 
 - `.mem0-source/server/prod.Dockerfile`：Mem0 API 生产镜像。
 - `.mem0-source/server/dashboard/Dockerfile`：Dashboard 镜像。
-- `.mem0-source/server/docker-compose.yaml`：API、MCP Adapter、Dashboard、双 PostgreSQL、监控与隔离恢复演练编排。
-- `.mem0-source/server/monitoring/`：Prometheus、Grafana、Alertmanager、Loki、Tempo 与 OpenTelemetry Collector 的固定配置。
+- `.mem0-source/server/docker-compose.yaml`：API、MCP Adapter、Dashboard 与 PostgreSQL 核心编排。
+- `.mem0-source/server/docker-compose.dr.yaml`：S3 异地灾备与隔离恢复演练选配编排。
+- `.mem0-source/server/docker-compose.observability.yaml`：Prometheus、Grafana、Alertmanager、Loki、Tempo 与 OpenTelemetry Collector 选配编排。
+- `.mem0-source/server/docker-compose.smtp.yaml`：在监控层之上启用 SMTP 告警的选配编排。
+- `.mem0-source/server/monitoring/`：监控、Trace、告警和 Grafana 面板的固定配置。
 - `.mem0-source/openresty/`：当前参考部署的反向代理、限流和隐私日志配置。
 - `services/mem0-mcp/`：MCP Adapter 的唯一受版本控制源码。
 
@@ -171,14 +174,10 @@ sudo sh -c 'umask 077; openssl rand -hex 32 > /data/mem0-runtime/secrets/mem0_jw
 sudo sh -c 'umask 077; openssl rand -hex 32 > /data/mem0Mcp/secrets/mem0_internal_service_key'
 sudo sh -c 'umask 077; openssl rand -hex 32 > /data/mem0Mcp/secrets/mcp_confirmation_secret'
 sudo sh -c 'umask 077; openssl rand -hex 32 > /data/mem0Mcp/secrets/mcp_project_scope_secret'
-sudo sh -c 'umask 077; openssl rand -hex 32 > /data/mem0-runtime/secrets/mem0_restic_password'
-sudo sh -c 'umask 077; openssl rand -hex 32 > /data/mem0-runtime/secrets/grafana_admin_password'
 sudo chown 10001:10001 \
   /data/mem0-runtime/secrets/postgres_password \
   /data/mem0-runtime/secrets/mem0_jwt_secret \
-  /data/mem0-runtime/secrets/mem0_restic_password \
   /data/mem0Mcp/secrets/*
-sudo chown 472:472 /data/mem0-runtime/secrets/grafana_admin_password
 sudo chmod 0400 /data/mem0-runtime/secrets/* /data/mem0Mcp/secrets/*
 ```
 
@@ -192,13 +191,30 @@ sudo chmod 0400 /data/mem0-runtime/secrets/* /data/mem0Mcp/secrets/*
 | `/data/mem0-runtime/secrets/llm_api_base` | OpenAI 兼容 LLM Base URL |
 | `/data/mem0-runtime/secrets/embedding_api_key` | Embedding 服务 API Key |
 | `/data/mem0-runtime/secrets/embedding_api_base` | OpenAI 兼容 Embedding Base URL |
+
+S3 异地灾备、完整监控栈和 SMTP 邮件告警均为选配，基础服务不需要对应 Secret。只在启用相应能力时创建：
+
+| 可选文件 | 内容 |
+| --- | --- |
 | `/data/mem0-runtime/secrets/mem0_s3_endpoint` | S3 兼容服务 Endpoint |
 | `/data/mem0-runtime/secrets/mem0_s3_bucket` | 禁止公开访问且启用版本控制的 Bucket 名称 |
 | `/data/mem0-runtime/secrets/mem0_s3_access_key` | 仅允许备份 Bucket 的访问标识 |
 | `/data/mem0-runtime/secrets/mem0_s3_secret_key` | 仅允许备份 Bucket 的访问密钥 |
+| `/data/mem0-runtime/secrets/mem0_restic_password` | Restic 客户端加密密码 |
+| `/data/mem0-runtime/secrets/grafana_admin_password` | Grafana 管理员密码 |
 | `/data/mem0-runtime/secrets/alertmanager.yml` | 包含 SMTP 发件、收件人与认证信息的完整 Alertmanager 配置 |
 
-写入上述文件后，将凭据源文件权限限制为 `0400`，目录限制为 `0700`，并按实际容器 UID 核对可读性；当前 API/MCP 使用 UID `10001`，Grafana 使用 UID `472`，Alertmanager 配置应允许其镜像内 UID `65534` 只读。如果自行替换镜像或用户，必须同步调整文件所有权。生产 Compose 会把 Secret 挂载到 `/run/secrets`，不会通过普通环境变量传递；S3、Restic、SMTP 和 Grafana 凭据不得出现在 Git、日志、Trace 或备份清单明文中。
+启用 S3 灾备或监控栈时，再生成随机密码并设置对应所有权：
+
+```bash
+sudo sh -c 'umask 077; openssl rand -hex 32 > /data/mem0-runtime/secrets/mem0_restic_password'
+sudo sh -c 'umask 077; openssl rand -hex 32 > /data/mem0-runtime/secrets/grafana_admin_password'
+sudo chown 10001:10001 /data/mem0-runtime/secrets/mem0_restic_password
+sudo chown 472:472 /data/mem0-runtime/secrets/grafana_admin_password
+sudo chmod 0400 /data/mem0-runtime/secrets/*
+```
+
+写入文件后，将凭据源文件权限限制为 `0400`，目录限制为 `0700`，并按实际容器 UID 核对可读性；当前 API/MCP 使用 UID `10001`，Grafana 使用 UID `472`，Alertmanager 配置应允许其镜像内 UID `65534` 只读。如果自行替换镜像或用户，必须同步调整文件所有权。Compose 会把启用能力所需的 Secret 挂载到 `/run/secrets`，不会通过普通环境变量传递；S3、Restic、SMTP 和 Grafana 凭据不得出现在 Git、日志、Trace 或备份清单明文中。Dashboard 只保存灾备开关和计划等非敏感配置，不回显或持久化这些凭据。
 
 创建 `/data/mem0-runtime/runtime.env`，只保存非敏感的模型配置，并设置为 `root:root`、权限 `0600`：
 
@@ -249,6 +265,19 @@ MODEL_GATEWAY_NETWORK_NAME=model-gateway
 
 上面的域名、身份、网段、网络名和发布标识只是格式示例，必须替换为实际值。`MEM0_INTERNAL_USER_ID` 和 `MEM0_INTERNAL_OWNER` 必须以字母或数字开头，只能包含字母、数字、点、下划线、冒号和连字符，最长 128 个字符；它们与 Embedding 模型、维度和 collection 在写入生产数据后都必须保持稳定。`MEM0_FORWARDED_ALLOW_IPS` 只能包含实际反向代理来源，不能为了方便设置为 `*`。发布标识应包含 Git 提交短 SHA 或 UTC 时间戳；不要使用 `latest`。将 `compose.env` 设置为 `root:root`、权限 `0600`，并在启动前完整检查 `.mem0-source/server/.env.example` 和生成后的 `docker-compose.yaml`。
 
+Compose 按能力拆成独立层，按需叠加：
+
+| 能力 | Compose 文件 | 额外要求 |
+| --- | --- | --- |
+| 核心 API、MCP、Dashboard、PostgreSQL | `docker-compose.yaml` | 只需要基础 Secret |
+| S3 异地灾备和隔离恢复演练 | `docker-compose.dr.yaml` | 五个 S3/Restic Secret；随后在 Dashboard 中启用并调整间隔 |
+| Prometheus、Grafana、Loki、Tempo 与导出器 | `docker-compose.observability.yaml` | `grafana_admin_password`；默认只在 Alertmanager 本地保留告警 |
+| SMTP 邮件告警 | `docker-compose.smtp.yaml` | 必须与监控层同时使用，并提供 `alertmanager.yml` |
+
+Dashboard 的“备份恢复”页面可随时启用或关闭 S3 灾备、恢复演练，并修改异地备份小时间隔和演练天数。启用但 Secret 不完整时，状态会显示“待配置”，调度器和手动请求都不会创建必然失败的任务。敏感凭据仍由部署侧 Secret 管理，不能在网页中读取或修改。
+
+监控端口可在 `compose.env` 中通过 `GRAFANA_HOST_PORT`、`PROMETHEUS_HOST_PORT` 和 `ALERTMANAGER_HOST_PORT` 调整。SMTP 收件人、发件服务器和认证属于敏感运维配置，继续在 `alertmanager.yml` 中维护；修改后只需重建 Alertmanager 容器，不需要重建 Mem0 镜像。
+
 ### 6. 构建镜像
 
 以下示例在目标主机的原生架构构建三个镜像：
@@ -289,6 +318,19 @@ sudo docker compose \
   config
 ```
 
+上面的命令只渲染核心服务。需要选配能力时，在 `config` 和后续所有 `up`、`ps`、`down` 命令中保持相同的 `--file` 组合。例如启用灾备和监控但不启用邮件：
+
+```bash
+sudo docker compose \
+  --env-file /data/mem0-runtime/compose.env \
+  --file .mem0-source/server/docker-compose.yaml \
+  --file .mem0-source/server/docker-compose.dr.yaml \
+  --file .mem0-source/server/docker-compose.observability.yaml \
+  config
+```
+
+如需 SMTP，再追加 `--file .mem0-source/server/docker-compose.smtp.yaml`。未叠加的能力不会启动，也不会要求对应 Secret 文件存在。
+
 确认配置后启动。Mem0 容器严格按“`Alembic` 迁移 → MCP 范围回填 → 统一记忆目录和历史回填 → 未收敛 Mutation 幂等重试 → 数量、正文哈希、项目范围、历史、反馈、检索事件、投影引用和 Mutation 一致性检查 → API”顺序启动；任一环节失败都不会启动 API：
 
 ```bash
@@ -298,7 +340,7 @@ sudo docker compose \
   up -d --no-build
 ```
 
-参考 Compose 只把管理服务绑定到回环地址：Mem0 API `127.0.0.1:8888`、MCP Adapter `127.0.0.1:8890`、Dashboard `127.0.0.1:3111`、PostgreSQL `127.0.0.1:8432`、Prometheus `127.0.0.1:9090`、Alertmanager `127.0.0.1:9093` 和 Grafana `127.0.0.1:3001`。Loki、Tempo、OpenTelemetry Collector、导出器与隔离演练数据库只在内部网络可见；不要把这些端口直接暴露到公网。
+参考 Compose 只把管理服务绑定到回环地址：核心服务为 Mem0 API `127.0.0.1:8888`、MCP Adapter `127.0.0.1:8890`、Dashboard `127.0.0.1:3111` 和 PostgreSQL `127.0.0.1:8432`；启用监控层后增加 Prometheus `127.0.0.1:9090`、Alertmanager `127.0.0.1:9093` 和 Grafana `127.0.0.1:3001`。Loki、Tempo、OpenTelemetry Collector、导出器与选配的隔离演练数据库只在内部网络可见；不要把这些端口直接暴露到公网。
 
 ### 8. 配置 HTTPS 反向代理
 
@@ -335,8 +377,8 @@ curl --fail https://mem0-api.example.com/api/health
 - Dashboard 能完成管理员初始化并正常登录。
 - Dashboard 的 API Key 页面可以分别创建“管理员 REST API”和“Codex MCP（受限）”两种 Key。
 - 管理员可以打开检索、治理和平台页面，完成一次混合检索、手动备份和恢复预览。
-- Prometheus 能采集 API、MCP、Dashboard、PostgreSQL、备份、配额、Mutation 与投影指标，Grafana 预置面板可见，Alertmanager SMTP 测试邮件送达。
-- Restic 能上传包含控制面库、pgvector 库、History SQLite、配置和脱敏校验清单的快照，并在隔离 PostgreSQL 中完成一次恢复演练。
+- 如启用监控层，Prometheus 能采集 API、MCP、Dashboard、PostgreSQL、备份、配额、Mutation 与投影指标，Grafana 预置面板可见；如同时启用 SMTP，再验证 Alertmanager 测试邮件送达。
+- 如启用 S3 灾备，Restic 能上传包含控制面库、pgvector 库、History SQLite、配置和脱敏校验清单的快照，并在已启用恢复演练时完成一次隔离恢复。
 - `viewer` 只能读取已分配项目，`editor` 只能修改具有项目编辑权限的记忆，未分配项目和无项目归属记忆不会暴露给普通账户。
 
 在 Dashboard 生成用途为“Codex MCP（受限）”的 Key 后，再继续安装客户端插件。不要把管理员 Key 配置给 Codex。
@@ -354,9 +396,9 @@ curl --fail https://mem0-api.example.com/api/health
 
 平台备份使用 `mem0-self-hosted-backup-v1` 格式，保存记忆、分类和治理设置，默认写入 `/data/mem0-runtime/backups`。单个备份最多包含 100000 条记忆，文件最大 512 MiB；超限时会明确失败，不会静默截断。`merge` 恢复会更新或新增记忆，`replace` 恢复会先生成安全备份并原子替换集合。两种模式都必须先生成恢复预览，并在执行时校验预览哈希。
 
-平台 JSON 备份不包含用户、API Key、质量反馈、活动记录、后台任务、评测用例或项目权限，不能替代 PostgreSQL 一致性备份，也不能单独用于完整灾难恢复。生产灾备使用 Restic 客户端加密，同时保存 `mem0_app` 控制面库、`postgres` pgvector 库、History SQLite 一致性快照、运行配置、Secret 和发布清单；默认保留 7 个日备份、4 个周备份、12 个每月备份，并每周在隔离 PostgreSQL 中验证最新快照。恢复演练必须对账记忆数量、正文哈希、项目范围、历史、向量 collection 与孤儿引用。
+平台 JSON 备份不包含用户、API Key、质量反馈、活动记录、后台任务、评测用例或项目权限，不能替代 PostgreSQL 一致性备份，也不能单独用于完整灾难恢复。选配的生产灾备使用 Restic 客户端加密，同时保存 `mem0_app` 控制面库、`postgres` pgvector 库、History SQLite 一致性快照、运行配置、Secret 和发布清单；默认保留 7 个日备份、4 个周备份、12 个每月备份。启用恢复演练后，会按 Dashboard 设置的天数在隔离 PostgreSQL 中验证最新快照，并对账记忆数量、正文哈希、项目范围、历史、向量 collection 与孤儿引用。
 
-升级前进入维护模式、停止全部写入，生成并上传同一时间点的 PostgreSQL、History、配置、Secret 和平台备份，同时记录 Git SHA、补丁 SHA 与三个镜像 digest。最新治理数据迁移链为 `009 → 010 → 011 → 012 → 013 → 014 → 015 → 016 → 017 → 018`，当前 head 为 `018`；Compose 启动时会执行 `alembic upgrade head`。首次升级到包含 `resolve_project_scope` 的版本时，必须先按第 4 步创建并备份 `mcp_project_scope_secret`，否则新 Adapter 会拒绝启动。拉取新提交后，在新的空目录重新物化和测试；只有迁移往返、数量与正文哈希对账、14 工具契约、评测门禁、镜像漏洞扫描、SBOM、Cosign 签名验证和隔离恢复演练全部通过，才更新 `compose.env` 中的三个不可变镜像 digest 并执行 `docker compose up -d --no-build`。若迁移或上线失败，停止新容器并恢复同一时间点的两个 PostgreSQL 数据库、History、配置、Secret 与旧镜像标识；禁止只回滚容器而保留 `018` 数据库。
+升级前进入维护模式、停止全部写入，生成同一时间点的 PostgreSQL、History、配置、Secret 和平台备份；启用 S3 灾备时还必须上传并验证该备份，同时记录 Git SHA、补丁 SHA 与三个镜像 digest。最新治理数据迁移链为 `009 → 010 → 011 → 012 → 013 → 014 → 015 → 016 → 017 → 018`，当前 head 为 `018`；Compose 启动时会执行 `alembic upgrade head`。首次升级到包含 `resolve_project_scope` 的版本时，必须先按第 4 步创建并备份 `mcp_project_scope_secret`，否则新 Adapter 会拒绝启动。拉取新提交后，在新的空目录重新物化和测试；迁移往返、数量与正文哈希对账、14 工具契约、评测门禁、镜像漏洞扫描、SBOM 和 Cosign 签名验证必须通过；只有启用 S3 灾备和恢复演练时，隔离恢复才属于本次发布门禁。通过后更新 `compose.env` 中的三个不可变镜像 digest，并使用与当前部署相同的 Compose 文件组合执行 `up -d --no-build`。若迁移或上线失败，停止新容器并恢复同一时间点的两个 PostgreSQL 数据库、History、配置、Secret 与旧镜像标识；禁止只回滚容器而保留 `018` 数据库。
 
 仓库不包含生产数据和 Secret，因此只备份 Git 仓库不足以灾难恢复。尤其不能丢失 `mcp_project_scope_secret`，否则无法继续为同一用户和仓库派生原有项目范围。
 

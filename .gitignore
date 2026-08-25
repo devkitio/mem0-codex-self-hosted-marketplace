@@ -10,8 +10,10 @@ Thumbs.db
 .tmp_unittest/
 /.mem0-source/
 /.mem0-feature-work/
+/.mem0-optionals-work/
 /.pnpm-store/
 /mem0-feature-work/
+/mem0-optionals-work/
 /backups/
 /runtime.env
 /secrets/
