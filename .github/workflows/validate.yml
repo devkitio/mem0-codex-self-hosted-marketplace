@@ -293,23 +293,20 @@ jobs:
           platforms: linux/arm64
           push: false
 
-  supply-chain-release:
-    name: 扫描、生成 SBOM 并签名生产镜像
+  supply-chain-publish:
+    name: 构建并发布生产镜像
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 30
     permissions:
       contents: read
       packages: write
-      id-token: write
     outputs:
       api-image: ${{ steps.publish.outputs.api_ref }}
       mcp-image: ${{ steps.publish.outputs.mcp_ref }}
       dashboard-image: ${{ steps.publish.outputs.dashboard_ref }}
     env:
       TRIVY_IMAGE: aquasec/trivy:0.68.2@sha256:05d0126976bdedcd0782a0336f77832dbea1c81b9cc5e4b3a5ea5d2ec863aca7
-      SYFT_IMAGE: anchore/syft:v1.38.0@sha256:825cad3a952c87676a6d07e9a3bb05ac9c401d598360070e970aa46d54c1727e
-      COSIGN_IMAGE: ghcr.io/sigstore/cosign/cosign:v2.6.1@sha256:68839b7f13dac5a6744a5d8818e984dd39183374e37855c19e14d623d9bc9037
     steps:
       - name: 检出仓库
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -357,24 +354,61 @@ jobs:
             echo "${component}_ref=${digest_ref}" >> "$GITHUB_OUTPUT"
             echo "- ${component}: \`${digest_ref}\`" >> "$GITHUB_STEP_SUMMARY"
           done
-      - name: Trivy 镜像门禁、Syft SBOM 与 Cosign keyless 签名
+
+  supply-chain-release:
+    name: Trivy 镜像门禁、SBOM 与签名（${{ matrix.component }}）
+    needs: supply-chain-publish
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        component: [api, mcp, dashboard]
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    env:
+      TRIVY_IMAGE: aquasec/trivy:0.68.2@sha256:05d0126976bdedcd0782a0336f77832dbea1c81b9cc5e4b3a5ea5d2ec863aca7
+      SYFT_IMAGE: anchore/syft:v1.38.0@sha256:825cad3a952c87676a6d07e9a3bb05ac9c401d598360070e970aa46d54c1727e
+      COSIGN_IMAGE: ghcr.io/sigstore/cosign/cosign:v2.6.1@sha256:68839b7f13dac5a6744a5d8818e984dd39183374e37855c19e14d623d9bc9037
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: 登录 GitHub Container Registry
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: echo "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+      - name: 解析不可变镜像摘要
+        id: image
+        run: |
+          set -euo pipefail
+          case '${{ matrix.component }}' in
+            api) image='${{ needs.supply-chain-publish.outputs.api-image }}' ;;
+            mcp) image='${{ needs.supply-chain-publish.outputs.mcp-image }}' ;;
+            dashboard) image='${{ needs.supply-chain-publish.outputs.dashboard-image }}' ;;
+          esac
+          case "$image" in
+            *@sha256:*) ;;
+            *) echo "${{ matrix.component }} 未使用不可变镜像摘要" >&2; exit 1 ;;
+          esac
+          echo "ref=$image" >> "$GITHUB_OUTPUT"
+      - name: Trivy 镜像门禁
+        env:
+          IMAGE: ${{ steps.image.outputs.ref }}
+        run: timeout 20m docker run --rm -v "$HOME/.docker:/root/.docker:ro" -v "$PWD:/workspace:ro" "$TRIVY_IMAGE" image --exit-code 1 --severity HIGH,CRITICAL --ignorefile /workspace/.trivyignore.yaml "$IMAGE"
+      - name: 生成 Syft SBOM
+        env:
+          IMAGE: ${{ steps.image.outputs.ref }}
+        run: timeout 15m docker run --rm -v "$HOME/.docker:/root/.docker:ro" -v "$PWD:/workspace" "$SYFT_IMAGE" "$IMAGE" -o "spdx-json=/workspace/sbom-${{ matrix.component }}.spdx.json"
+      - name: Cosign keyless 签名并验证
+        env:
+          IMAGE: ${{ steps.image.outputs.ref }}
         run: |
           set -euo pipefail
           identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/validate.yml@refs/heads/main"
-          for component in api mcp dashboard; do
-            case "$component" in
-              api) image='${{ steps.publish.outputs.api_ref }}' ;;
-              mcp) image='${{ steps.publish.outputs.mcp_ref }}' ;;
-              dashboard) image='${{ steps.publish.outputs.dashboard_ref }}' ;;
-            esac
-            case "$image" in
-              *@sha256:*) ;;
-              *) echo "${component} 未使用不可变镜像摘要" >&2; exit 1 ;;
-            esac
-            docker run --rm -v "$HOME/.docker:/root/.docker:ro" -v "$PWD:/workspace:ro" "$TRIVY_IMAGE" image --exit-code 1 --severity HIGH,CRITICAL --ignorefile /workspace/.trivyignore.yaml "$image"
-            docker run --rm -v "$HOME/.docker:/root/.docker:ro" -v "$PWD:/workspace" "$SYFT_IMAGE" "$image" -o "spdx-json=/workspace/sbom-${component}.spdx.json"
-            docker run --rm -v "$HOME/.docker/config.json:/tmp/docker-config/config.json:ro" -v "$PWD:/workspace:ro" -e DOCKER_CONFIG=/tmp/docker-config -e ACTIONS_ID_TOKEN_REQUEST_TOKEN -e ACTIONS_ID_TOKEN_REQUEST_URL "$COSIGN_IMAGE" attest --yes --type spdxjson --predicate "/workspace/sbom-${component}.spdx.json" "$image"
-            docker run --rm -v "$HOME/.docker/config.json:/tmp/docker-config/config.json:ro" -e DOCKER_CONFIG=/tmp/docker-config -e ACTIONS_ID_TOKEN_REQUEST_TOKEN -e ACTIONS_ID_TOKEN_REQUEST_URL "$COSIGN_IMAGE" sign --yes "$image"
-            docker run --rm -v "$HOME/.docker/config.json:/tmp/docker-config/config.json:ro" -e DOCKER_CONFIG=/tmp/docker-config "$COSIGN_IMAGE" verify --certificate-identity "$identity" --certificate-oidc-issuer https://token.actions.githubusercontent.com "$image"
-            docker run --rm -v "$HOME/.docker/config.json:/tmp/docker-config/config.json:ro" -e DOCKER_CONFIG=/tmp/docker-config "$COSIGN_IMAGE" verify-attestation --type spdxjson --certificate-identity "$identity" --certificate-oidc-issuer https://token.actions.githubusercontent.com "$image"
-          done
+          timeout 10m docker run --rm -v "$HOME/.docker/config.json:/tmp/docker-config/config.json:ro" -v "$PWD:/workspace:ro" -e DOCKER_CONFIG=/tmp/docker-config -e ACTIONS_ID_TOKEN_REQUEST_TOKEN -e ACTIONS_ID_TOKEN_REQUEST_URL "$COSIGN_IMAGE" attest --yes --type spdxjson --predicate "/workspace/sbom-${{ matrix.component }}.spdx.json" "$IMAGE"
+          timeout 10m docker run --rm -v "$HOME/.docker/config.json:/tmp/docker-config/config.json:ro" -e DOCKER_CONFIG=/tmp/docker-config -e ACTIONS_ID_TOKEN_REQUEST_TOKEN -e ACTIONS_ID_TOKEN_REQUEST_URL "$COSIGN_IMAGE" sign --yes "$IMAGE"
+          timeout 5m docker run --rm -v "$HOME/.docker/config.json:/tmp/docker-config/config.json:ro" -e DOCKER_CONFIG=/tmp/docker-config "$COSIGN_IMAGE" verify --certificate-identity "$identity" --certificate-oidc-issuer https://token.actions.githubusercontent.com "$IMAGE"
+          timeout 5m docker run --rm -v "$HOME/.docker/config.json:/tmp/docker-config/config.json:ro" -e DOCKER_CONFIG=/tmp/docker-config "$COSIGN_IMAGE" verify-attestation --type spdxjson --certificate-identity "$identity" --certificate-oidc-issuer https://token.actions.githubusercontent.com "$IMAGE"

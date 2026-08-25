@@ -593,7 +593,7 @@ python3 plugins/mem0/scripts/mem0_self_hosted.py --check
 
 GitHub Actions 会在 Ubuntu、Windows 和 macOS 上分别执行仓库校验与完整单元测试。
 
-Linux 任务还会安装 `services/mem0-mcp/requirements.lock` 并运行 Adapter 的鉴权、内部接口、真实 ASGI Bearer 链路和实际 `tools/list` 14 工具快照测试；生产 Adapter 的 Dockerfile 与锁定源码均位于 `services/mem0-mcp`。Mem0 服务任务使用隔离 PostgreSQL 验证 `006 → 018 → 006 → 018` 迁移往返、服务测试、Python 统一记忆契约、PGVector 类型过滤、5001 条回填和跨进程恢复。Dashboard 任务使用 Node 22 与 pnpm 10.34.2 执行格式、类型、构建、Playwright 治理端到端测试、生产依赖审计和运行镜像健康检查；独立 TypeScript SDK 任务验证持久化 SQLite 历史、共享黄金契约和 PGVector 全文检索配置；三个生产镜像还会分别执行 ARM64 构建验证，并在主分支发布时执行 `pip-audit`、Trivy 高危漏洞门禁、Syft SBOM 生成以及基于不可变镜像 digest 的 Cosign keyless 签名和验证。
+Linux 任务还会安装 `services/mem0-mcp/requirements.lock` 并运行 Adapter 的鉴权、内部接口、真实 ASGI Bearer 链路和实际 `tools/list` 14 工具快照测试；生产 Adapter 的 Dockerfile 与锁定源码均位于 `services/mem0-mcp`。Mem0 服务任务使用隔离 PostgreSQL 验证 `006 → 018 → 006 → 018` 迁移往返、服务测试、Python 统一记忆契约、PGVector 类型过滤、5001 条回填和跨进程恢复。Dashboard 任务使用 Node 22 与 pnpm 10.34.2 执行格式、类型、构建、Playwright 治理端到端测试、生产依赖审计和运行镜像健康检查；独立 TypeScript SDK 任务验证持久化 SQLite 历史、共享黄金契约和 PGVector 全文检索配置；三个生产镜像还会分别执行 ARM64 构建验证。主分支发布时会执行 `pip-audit`，生成三个不可变镜像 digest，再按 API、MCP、Dashboard 三个组件并行执行 Trivy 高危漏洞门禁、Syft SBOM 生成及 Cosign keyless 签名和验证；每个外部扫描或签名命令都有独立超时，避免单个组件卡住导致整项无诊断取消。
 
 当前实现还通过以下验收：
 
