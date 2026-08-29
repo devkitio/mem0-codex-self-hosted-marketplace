@@ -17205,13 +17205,6 @@ index 0000000000000000000000000000000000000000..1e58e5a7d693117e4efe14099e670666
 +    </div>
 +  );
 +}
-diff --git a/server/dashboard/src/app/(root)/dashboard/requests/page.tsx b/server/dashboard/src/app/(root)/dashboard/requests/page.tsx
-index 3198ac37f24d270968d4377f60ce44e1d907f9d8..f660795c3be62fcbc4b65cad86e3395cb50106e0 100644
---- a/server/dashboard/src/app/(root)/dashboard/requests/page.tsx
-+++ b/server/dashboard/src/app/(root)/dashboard/requests/page.tsx
-@@ -27 +27 @@ type RequestLog = {
--const REQUEST_LOG_LIMIT = 200;
-+const REQUEST_LOG_LIMIT = 5000;
 diff --git a/server/dashboard/src/app/(root)/dashboard/search/page.tsx b/server/dashboard/src/app/(root)/dashboard/search/page.tsx
 new file mode 100644
 index 0000000000000000000000000000000000000000..315060682f711906761239c48fe6be7f344a557e
